@@ -1,0 +1,142 @@
+{
+  "schema_version": "collection_plan_v1",
+  "minimum_complete_runs": 12,
+  "minimum_frames_per_run": 80,
+  "target_frames_per_run": 100,
+  "required_execution_mode": "ue5_kinematic_expert_v1",
+  "required_entity_ids": [
+    "target_red",
+    "target_blue",
+    "target_left",
+    "target_right"
+  ],
+  "relation_margin_m": 0.5,
+  "relation_evaluation_frames": 1,
+  "minimum_relation_pass_fraction": 1.0,
+  "motion_evaluation_frames": 50,
+  "minimum_motion_pass_fraction": 0.6,
+  "minimum_pairwise_distance_change_m": 0.05,
+  "note": "Final S2 near-range collection: L7 (red left / blue right) and L7B (red right / blue left), with 4.5 m target-pair spawn distance and 7 m white distractors. Collection runs use -YawFixWholeRun and SceneExecPort for the UE5 kinematic executor.",
+  "slots": [
+    {
+      "slot_id": "L7_S2_R1",
+      "layout_id": "L7",
+      "motion_state": "S2",
+      "scene_seed": 220701,
+      "relations": [
+        ["left_of", "target_red", "target_blue"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7_S2_R2",
+      "layout_id": "L7",
+      "motion_state": "S2",
+      "scene_seed": 220702,
+      "relations": [
+        ["left_of", "target_red", "target_blue"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7_S2_R3",
+      "layout_id": "L7",
+      "motion_state": "S2",
+      "scene_seed": 220703,
+      "relations": [
+        ["left_of", "target_red", "target_blue"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7_S2_R4",
+      "layout_id": "L7",
+      "motion_state": "S2",
+      "scene_seed": 220704,
+      "relations": [
+        ["left_of", "target_red", "target_blue"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7_S2_R5",
+      "layout_id": "L7",
+      "motion_state": "S2",
+      "scene_seed": 220705,
+      "relations": [
+        ["left_of", "target_red", "target_blue"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7_S2_R6",
+      "layout_id": "L7",
+      "motion_state": "S2",
+      "scene_seed": 220706,
+      "relations": [
+        ["left_of", "target_red", "target_blue"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7B_S2_R1",
+      "layout_id": "L7B",
+      "motion_state": "S2",
+      "scene_seed": 220801,
+      "relations": [
+        ["left_of", "target_blue", "target_red"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7B_S2_R2",
+      "layout_id": "L7B",
+      "motion_state": "S2",
+      "scene_seed": 220802,
+      "relations": [
+        ["left_of", "target_blue", "target_red"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7B_S2_R3",
+      "layout_id": "L7B",
+      "motion_state": "S2",
+      "scene_seed": 220803,
+      "relations": [
+        ["left_of", "target_blue", "target_red"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7B_S2_R4",
+      "layout_id": "L7B",
+      "motion_state": "S2",
+      "scene_seed": 220804,
+      "relations": [
+        ["left_of", "target_blue", "target_red"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7B_S2_R5",
+      "layout_id": "L7B",
+      "motion_state": "S2",
+      "scene_seed": 220805,
+      "relations": [
+        ["left_of", "target_blue", "target_red"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    },
+    {
+      "slot_id": "L7B_S2_R6",
+      "layout_id": "L7B",
+      "motion_state": "S2",
+      "scene_seed": 220806,
+      "relations": [
+        ["left_of", "target_blue", "target_red"],
+        ["left_of", "target_left", "target_right"]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+# Day 11B PC dataset registry and split configuration.
+#
+# Every value here must be under version control.  Paths that point at
+# external data (outside the repo) use the DATA_ROOT override below so the
+# same config works on different machines.
+
+dataset_version: "v1"
+registry_schema_version: "dataset_registry_v1"
+split_schema_version: "group_split_v1"
+
+# --- Data layout -----------------------------------------------------------
+# DATA_ROOT is the external directory that holds incoming/, extracted/,
+# registry/, features/, checkpoints/ and reports/.  Override it with the
+# DATASET_DATA_ROOT environment variable.
+data_root: "../data"
+
+# --- Split configuration ---------------------------------------------------
+# Splits are *only* defined by Run ID / Scene Seed grouping.
+# Language-template families are validated for non-overlap but are not the
+# primary split key (visual / scene novelty comes from held-out Runs).
+
+split_seed: 42
+
+# Ratios are applied to *Scene Seed groups*, not individual Runs.
+# With a single Scene Seed (pilot) this will naturally produce
+# training_ready=false.
+train_ratio: 0.6
+validation_ratio: 0.2
+test_ratio: 0.2
+
+# --- Frame sampling --------------------------------------------------------
+# Stride > 1 reduces the dominance of nearly-identical adjacent frames
+# inside the same Run during training.  The registry still records every
+# frame; this is a loader-level default.
+frame_stride: 3
+
+# --- Minimums --------------------------------------------------------------
+# Day 12 is the first training gate. A Run only counts after its episode,
+# quality report, 9/9 supervision, and collection-slot metadata all pass.
+min_training_runs: 12
+min_frames_per_run: 80
+min_scene_seeds: 3
+
+# Acceptance snapshots are frozen rather than inferred from Python rounding.
+fixed_split_counts:
+  12: [8, 2, 2]
+  30: [18, 6, 6]
+
+# --- Language template families --------------------------------------------
+# These must match the split values in dataset/language/instructions.jsonl.
+# The split validator ensures that train / validation / test instruction
+# template families never overlap.
+language_template_families:
+  train: "train"
+  validation: "validation"
+  test: "test"

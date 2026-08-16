@@ -1,0 +1,52 @@
+# Day 16 fresh confirmation on two STOP-held, counterfactual L3/L4 Runs.
+
+schema_version: "interventions_v1"
+experiment_name: "paired_v6_fresh_color_confirmation"
+expected_checkpoint_git_sha: "a7eb7ab"
+expected_training_summary_sha256: "2ddd4a066455eded821d18a570a425c627b6f9e50fbbbf3a8e36887b01551ec1"
+require_sealed_test_gate: false
+expected_run_count: 2
+expected_registry_sha256: "c252d167987d580512e177950114fd52301de4db16f4563e5ff24173c5347fc5"
+expected_split_sha256: "987fc9599a26e90eba0eb63a0a08509a19fbbe0aaa0f97e1422ab9ee8967e1b3"
+expected_feature_set_manifest_sha256: "267125c63c31257df9e476b1d6e81433e02ba513abe6e36fb4272bc933160243"
+frame_stride: 3
+seeds: [17, 23, 42]
+
+language_interventions:
+  require_pair_count: 24
+  evaluation_run_split: "test"
+  evaluation_language_splits: ["train", "validation", "test"]
+  minimum_directional_accuracy: 0.60
+  minimum_assignment_accuracy: 0.60
+  minimum_response_ratio: 0.02
+
+color_swap:
+  evaluation_run_split: "test"
+  left_slot: "L3_S0_R14"
+  right_slot: "L4_S0_R14"
+  instruction_ids:
+    - "follow_red_10m_09"
+    - "follow_blue_10m_09"
+  minimum_directional_accuracy: 0.60
+  minimum_assignment_accuracy: 0.60
+  minimum_response_ratio: 0.02
+
+ablations:
+  variants:
+    - "no_language"
+    - "no_entity_geometry"
+  minimum_language_relative_action_error_degradation: 0.05
+  minimum_entity_bearing_relative_action_error_degradation: 0.05
+
+fail_closed:
+  faults:
+    - "missing_language"
+    - "missing_entity_geometry"
+    - "entity_alignment_error"
+  maximum_nonzero_action_m: 0.0
+  require_all_invalid: true
+  require_stop_selected: true
+
+report:
+  maximum_failure_cases: 200
+  maximum_action_plots: 40

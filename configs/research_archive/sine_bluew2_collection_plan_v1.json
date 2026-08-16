@@ -1,0 +1,238 @@
+{
+ "schema_version": "collection_plan_v1",
+ "minimum_complete_runs": 12,
+ "minimum_frames_per_run": 80,
+ "target_frames_per_run": 100,
+ "required_execution_mode": "ue5_kinematic_expert_v1",
+ "required_entity_ids": [
+  "target_red",
+  "target_blue",
+  "target_left",
+  "target_right"
+ ],
+ "relation_margin_m": 0.5,
+ "relation_evaluation_frames": 1,
+ "minimum_relation_pass_fraction": 1.0,
+ "motion_evaluation_frames": 50,
+ "minimum_motion_pass_fraction": 0.3,
+ "minimum_pairwise_distance_change_m": 0.05,
+ "note": "WINDOWED blue with 25s static-start frames (ASV held, targets at spawn) so the online startup geometry is in the training distribution.",
+ "slots": [
+  {
+   "slot_id": "BLUEW2_L7_S2_R1",
+   "layout_id": "L7",
+   "motion_state": "S2",
+   "scene_seed": 260011,
+   "relations": [
+    [
+     "left_of",
+     "target_red",
+     "target_blue"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7_S2_R2",
+   "layout_id": "L7",
+   "motion_state": "S2",
+   "scene_seed": 260012,
+   "relations": [
+    [
+     "left_of",
+     "target_red",
+     "target_blue"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7_S2_R3",
+   "layout_id": "L7",
+   "motion_state": "S2",
+   "scene_seed": 260013,
+   "relations": [
+    [
+     "left_of",
+     "target_red",
+     "target_blue"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7_S2_R4",
+   "layout_id": "L7",
+   "motion_state": "S2",
+   "scene_seed": 260014,
+   "relations": [
+    [
+     "left_of",
+     "target_red",
+     "target_blue"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7_S2_R5",
+   "layout_id": "L7",
+   "motion_state": "S2",
+   "scene_seed": 260015,
+   "relations": [
+    [
+     "left_of",
+     "target_red",
+     "target_blue"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7_S2_R6",
+   "layout_id": "L7",
+   "motion_state": "S2",
+   "scene_seed": 260016,
+   "relations": [
+    [
+     "left_of",
+     "target_red",
+     "target_blue"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7B_S2_R1",
+   "layout_id": "L7B",
+   "motion_state": "S2",
+   "scene_seed": 260111,
+   "relations": [
+    [
+     "left_of",
+     "target_blue",
+     "target_red"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7B_S2_R2",
+   "layout_id": "L7B",
+   "motion_state": "S2",
+   "scene_seed": 260112,
+   "relations": [
+    [
+     "left_of",
+     "target_blue",
+     "target_red"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7B_S2_R3",
+   "layout_id": "L7B",
+   "motion_state": "S2",
+   "scene_seed": 260113,
+   "relations": [
+    [
+     "left_of",
+     "target_blue",
+     "target_red"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7B_S2_R4",
+   "layout_id": "L7B",
+   "motion_state": "S2",
+   "scene_seed": 260114,
+   "relations": [
+    [
+     "left_of",
+     "target_blue",
+     "target_red"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7B_S2_R5",
+   "layout_id": "L7B",
+   "motion_state": "S2",
+   "scene_seed": 260115,
+   "relations": [
+    [
+     "left_of",
+     "target_blue",
+     "target_red"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  },
+  {
+   "slot_id": "BLUEW2_L7B_S2_R6",
+   "layout_id": "L7B",
+   "motion_state": "S2",
+   "scene_seed": 260116,
+   "relations": [
+    [
+     "left_of",
+     "target_blue",
+     "target_red"
+    ],
+    [
+     "left_of",
+     "target_left",
+     "target_right"
+    ]
+   ]
+  }
+ ]
+}

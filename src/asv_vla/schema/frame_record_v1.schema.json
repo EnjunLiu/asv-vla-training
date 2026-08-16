@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/EnjunLiu/asv-jetson-ws/schema/frame_record_v1.schema.json",
+  "title": "ASV FrameRecord v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "scene_seed",
+    "frame_index",
+    "stamp_us",
+    "frame_id",
+    "task",
+    "ego",
+    "camera",
+    "entities",
+    "modality_mask",
+    "valid",
+    "detail"
+  ],
+  "properties": {
+    "schema_version": {"const": "frame_record_v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "scene_seed": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "frame_index": {"type": "integer", "minimum": 0},
+    "stamp_us": {"type": "integer", "minimum": 0},
+    "frame_id": {"const": "base_link"},
+    "task": {"$ref": "#/$defs/task"},
+    "ego": {"$ref": "#/$defs/ego"},
+    "camera": {"$ref": "#/$defs/camera"},
+    "entities": {"$ref": "#/$defs/entities"},
+    "modality_mask": {"$ref": "#/$defs/modality_mask"},
+    "valid": {"type": "boolean"},
+    "detail": {"type": "string", "minLength": 1, "maxLength": 512}
+  },
+  "$defs": {
+    "vector3": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number"},
+        {"type": "number"},
+        {"type": "number"}
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stamp_us", "text", "valid"],
+      "properties": {
+        "stamp_us": {"type": "integer", "minimum": 0},
+        "text": {"type": "string", "maxLength": 512},
+        "valid": {"type": "boolean"}
+      }
+    },
+    "ego": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stamp_us",
+        "world_frame_id",
+        "simulation_time_s",
+        "position_m",
+        "rpy_ue_rad",
+        "surge_velocity_mps",
+        "yaw_rate_radps",
+        "valid"
+      ],
+      "properties": {
+        "stamp_us": {"type": "integer", "minimum": 0},
+        "world_frame_id": {"const": "ue_world"},
+        "simulation_time_s": {"type": "number", "minimum": 0},
+        "position_m": {"$ref": "#/$defs/vector3"},
+        "rpy_ue_rad": {"$ref": "#/$defs/vector3"},
+        "surge_velocity_mps": {"type": "number"},
+        "yaw_rate_radps": {"type": "number"},
+        "valid": {"type": "boolean"}
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stamp_us",
+        "image_path",
+        "encoding",
+        "width_px",
+        "height_px",
+        "fov_angle_deg",
+        "mount_frame_id",
+        "mount_position_m",
+        "mount_rpy_ue_deg",
+        "valid"
+      ],
+      "properties": {
+        "stamp_us": {"type": "integer", "minimum": 0},
+        "image_path": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "encoding": {"const": "jpeg"},
+        "width_px": {"const": 1280},
+        "height_px": {"const": 720},
+        "fov_angle_deg": {"const": 90.0},
+        "mount_frame_id": {"const": "base_link"},
+        "mount_position_m": {"$ref": "#/$defs/vector3"},
+        "mount_rpy_ue_deg": {"$ref": "#/$defs/vector3"},
+        "valid": {"type": "boolean"}
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "class_name",
+        "color",
+        "is_target",
+        "visible",
+        "relative_position_m",
+        "relative_velocity_mps",
+        "valid"
+      ],
+      "properties": {
+        "entity_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "class_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "color": {"type": "string", "minLength": 1, "maxLength": 128},
+        "is_target": {"type": "boolean"},
+        "visible": {"type": "boolean"},
+        "relative_position_m": {"$ref": "#/$defs/vector3"},
+        "relative_velocity_mps": {"$ref": "#/$defs/vector3"},
+        "source": {
+          "type": "string",
+          "enum": ["ue_truth", "image_perception", "temporal_tracker", ""]
+        },
+        "bbox_px": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "array",
+              "prefixItems": [
+                {"type": "number"},
+                {"type": "number"},
+                {"type": "number"},
+                {"type": "number"}
+              ],
+              "items": false,
+              "minItems": 4,
+              "maxItems": 4
+            }
+          ]
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "velocity_valid": {"type": "boolean"},
+        "valid": {"const": true}
+      }
+    },
+    "entities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stamp_us", "frame_id", "items", "valid"],
+      "properties": {
+        "stamp_us": {"type": "integer", "minimum": 0},
+        "frame_id": {"const": "base_link"},
+        "items": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/entity"},
+          "maxItems": 64
+        },
+        "valid": {"type": "boolean"}
+      }
+    },
+    "modality_mask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "ego", "camera", "entities"],
+      "properties": {
+        "task": {"type": "boolean"},
+        "ego": {"type": "boolean"},
+        "camera": {"type": "boolean"},
+        "entities": {"type": "boolean"}
+      }
+    }
+  }
+}
+
+
