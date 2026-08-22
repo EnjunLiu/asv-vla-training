@@ -21,3 +21,12 @@ wandb/
 *.npz
 *.npy
 *.tmp
+
+# local ops / bulky experiment outputs
+WORKSPACE_CONTEXT.md
+experiments/**/closed_loop_logs/
+experiments/**/*.log
+experiments/**/*.png
+experiments/**/*.jpg
+experiments/**/*.jpeg
+experiments/**/__pycache__/
