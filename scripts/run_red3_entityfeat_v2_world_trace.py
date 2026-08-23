@@ -8,20 +8,21 @@ import sys
 import time
 from pathlib import Path
 
-LOG_NAME = "closed_loop_red3_entityfeat_v2_run4_20260823.log"
+LOG_NAME = "closed_loop_red3_entityfeat_v2.log"
 JETSON = "jetson@192.168.137.100"
 REMOTE_LOG = f"/home/jetson/jetson_asv_ws/logs/{LOG_NAME}"
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "experiments/chase_standoff_entityfeat_v2"
 LOCAL_LOG = OUT_DIR / LOG_NAME
-UE_LOG = OUT_DIR / "red_3m_ue_run4.log"
-PLOT_OUT = OUT_DIR / "red_3m_world_trace_run4.png"
-RESTART = ROOT / "scripts/jetson_restart_red3_entityfeat_v2_run4.sh"
+UE_LOG = OUT_DIR / "red_3m_ue.log"
+PLOT_OUT = OUT_DIR / "red_3m_world_trace.png"
+RESTART = ROOT / "scripts/jetson_restart_red3_entityfeat_v2.sh"
 UE = Path(r"D:\Softwares\Unreal Engine\UE_5.6\Engine\Binaries\Win64\UnrealEditor.exe")
 UPROJECT = Path(r"D:\asv-unreal-simulation\VLA.uproject")
 UE_SAVED_LOG = Path(r"D:\asv-unreal-simulation\Saved\Logs\VLA.log")
+UE_RUNTIME_SEC = 180
 
-MARKERS = ("TASK_READY_VALID", "POLICY_READY", "entity_embedding=on")
+MARKERS = ("TASK_READY_VALID", "POLICY_READY")
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
@@ -54,9 +55,16 @@ def main() -> int:
         text=True,
     )
     time.sleep(3)
-    run(["scp", "-o", "BatchMode=yes", str(RESTART), f"{JETSON}:/tmp/jetson_restart_red3_entityfeat_v2_run4.sh"])
-    run(["ssh", "-o", "BatchMode=yes", JETSON, "sed -i 's/\\r$//' /tmp/jetson_restart_red3_entityfeat_v2_run4.sh && chmod +x /tmp/jetson_restart_red3_entityfeat_v2_run4.sh"])
-    launch = run(["ssh", "-o", "BatchMode=yes", JETSON, "bash /tmp/jetson_restart_red3_entityfeat_v2_run4.sh"])
+    run([
+        "ssh", "-o", "BatchMode=yes", JETSON,
+        "pkill -f 'ros2 launch bringup vla_closed_loop' || true; "
+        "pkill -f '/install/lib/vla/' || true; "
+        "pkill -f '/install/lib/bridge/bridge_node' || true; "
+        "sleep 8",
+    ])
+    run(["scp", "-o", "BatchMode=yes", str(RESTART), f"{JETSON}:/tmp/jetson_restart_red3_entityfeat_v2.sh"])
+    run(["ssh", "-o", "BatchMode=yes", JETSON, "sed -i 's/\\r$//' /tmp/jetson_restart_red3_entityfeat_v2.sh && chmod +x /tmp/jetson_restart_red3_entityfeat_v2.sh"])
+    launch = run(["ssh", "-o", "BatchMode=yes", JETSON, "bash /tmp/jetson_restart_red3_entityfeat_v2.sh"])
     print(launch.stdout)
     if launch.returncode != 0:
         print(launch.stderr, file=sys.stderr)
@@ -77,14 +85,14 @@ def main() -> int:
         print("TIMEOUT waiting for stack ready")
         return 2
 
-    print("STACK_READY; waiting 60s for CUDA/task warmup...")
-    time.sleep(60)
+    print("STACK_READY; waiting 90s for CUDA/task warmup...")
+    time.sleep(90)
 
     ue_args = [
         str(UE), str(UPROJECT), "Main_Map",
         "-game", "-SceneAuto",
         "-Slot=RED_3M_TEST", "-Layout=L7B", "-Motion=S2", "-Seed=231106",
-        "-SceneExecPort=8081", "-MaxRuntimeSeconds=120", "-YawFixWholeRun",
+        "-SceneExecPort=8081", f"-MaxRuntimeSeconds={UE_RUNTIME_SEC}", "-YawFixWholeRun",
         "-log",
     ]
     print("+ starting UE:", " ".join(ue_args))
@@ -96,8 +104,8 @@ def main() -> int:
             stderr=subprocess.STDOUT,
             cwd=str(UPROJECT.parent),
         )
-        print("STACK_READY; UE running up to 130s for full scene...")
-        deadline = time.time() + 130
+        print(f"STACK_READY; UE running up to {UE_RUNTIME_SEC + 15}s for full scene...")
+        deadline = time.time() + UE_RUNTIME_SEC + 15
         while time.time() < deadline and ue.poll() is None:
             time.sleep(15)
             text = run(["ssh", "-o", "BatchMode=yes", JETSON, f"tail -n 200 {REMOTE_LOG} 2>/dev/null || true"]).stdout
@@ -110,7 +118,7 @@ def main() -> int:
             ue.wait(timeout=10)
 
     if UE_SAVED_LOG.is_file():
-        shutil.copy2(UE_SAVED_LOG, OUT_DIR / "red_3m_ue_run4_saved.log")
+        shutil.copy2(UE_SAVED_LOG, OUT_DIR / "red_3m_ue_saved.log")
         saved_lines = extract_scene_lines(UE_SAVED_LOG, UE_LOG)
         print(f"extracted {saved_lines} scene lines from Saved/Logs/VLA.log")
     else:
@@ -141,7 +149,7 @@ def main() -> int:
         "ue_connected": "UE5 connected" in text,
     }
     print("SUMMARY", summary)
-    return 0 if scene_lines >= 20 and summary["policy_inferred"] >= 30 else 3
+    return 0 if scene_lines >= 100 and summary["policy_inferred"] >= 50 else 3
 
 
 if __name__ == "__main__":

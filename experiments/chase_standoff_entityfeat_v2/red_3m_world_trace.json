@@ -1,0 +1,15 @@
+{
+  "ue_log": "D:\\asv-vla-training\\experiments\\chase_standoff_entityfeat_v2\\red_3m_ue.log",
+  "output": "D:\\asv-vla-training\\experiments\\chase_standoff_entityfeat_v2\\red_3m_world_trace.png",
+  "samples": 181,
+  "complete": {
+    "slot": "RED_3M_TEST",
+    "scene_seed": 231106,
+    "runtime_seconds": 180.01
+  },
+  "mean_abs_error_m": 53.18239974975586,
+  "final_error_m": 104.53146362304688,
+  "max_abs_error_m": 104.53146362304688,
+  "initial_error_m": 1.5312862396240234,
+  "mean_distance_m": 56.18239974975586
+}

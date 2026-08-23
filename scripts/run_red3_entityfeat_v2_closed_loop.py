@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-LOG_NAME = "closed_loop_red3_entityfeat_v2_20260823.log"
+LOG_NAME = "closed_loop_red3_entityfeat_v2.log"
 JETSON = "jetson@192.168.137.100"
 REMOTE_LOG = f"/home/jetson/jetson_asv_ws/logs/{LOG_NAME}"
 LOCAL_LOG = Path(__file__).resolve().parents[1] / "experiments/chase_standoff_entityfeat_v2" / LOG_NAME
@@ -16,7 +16,7 @@ UE = Path(r"D:\Softwares\Unreal Engine\UE_5.6\Engine\Binaries\Win64\UnrealEditor
 UPROJECT = Path(r"D:\asv-unreal-simulation\VLA.uproject")
 UE_LOG = LOCAL_LOG.with_suffix(".ue.log")
 
-MARKERS = ("TASK_READY_VALID", "POLICY_READY", "entity_embedding=on")
+MARKERS = ("TASK_READY_VALID", "POLICY_READY")
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:

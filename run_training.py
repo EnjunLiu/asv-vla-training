@@ -175,8 +175,10 @@ def policy_eval(
     embeddings,
     slots,
     *,
+    perception_model=None,
     entity_embedding_runtime=None,
     camera_profile=None,
+    use_gt_entities: bool = False,
 ):
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
     validate_policy_checkpoint(checkpoint)
@@ -187,8 +189,10 @@ def policy_eval(
     dataset = build_policy_dataset(
         selected,
         embeddings,
+        perception_model=perception_model,
         entity_embedding_runtime=entity_embedding_runtime,
         camera_profile=camera_profile,
+        use_gt_entities=use_gt_entities,
     )
     with torch.inference_mode():
         output = policy(
@@ -253,7 +257,7 @@ def rollout_plot(model_path: Path, records, embeddings, output_path: Path):
             temp.slot_id = "rollout"
             temp.frame_index = 0
             temp.action = np.zeros(2, dtype=np.float32)
-            data = build_policy_dataset([temp], embeddings, distance_scales=(1.0,))
+            data = build_policy_dataset([temp], embeddings, use_gt_entities=True)
             with torch.inference_mode():
                 output = policy(
                     language=torch.from_numpy(data["language"]),

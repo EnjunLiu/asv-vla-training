@@ -32,8 +32,9 @@
       "RED_4M_TEST"
     ]
   },
-  "crop_count": 19232,
+  "crop_count": 19307,
+  "crop_geometry": "online_perception",
   "checkpoint": "D:\\asv-vla-training\\experiments\\chase_standoff_entityfeat_v2\\entity_embedding.pt",
-  "train_loss": 0.006689026486128569,
-  "train_accuracy": 0.995164309484193
+  "train_loss": 0.2757958173751831,
+  "train_accuracy": 0.9900036256280106
 }

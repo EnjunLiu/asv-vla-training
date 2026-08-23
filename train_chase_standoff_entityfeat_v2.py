@@ -21,7 +21,7 @@ from decision import (
     build_entity_features,
 )
 from entity_embedding import EntityEmbeddingHead
-from perception import CameraProfile
+from perception import CameraProfile, ImageEntityModel
 from train_final import (
     EntityObject,
     load_episode_records,
@@ -99,12 +99,14 @@ def main() -> None:
         ENTITY_EMBEDDING_PATH, device="cuda"
     )
     profile = CameraProfile()
+    perception_model = ImageEntityModel.load(RUN / "perception.npz")
     policy_path = RUN / "policy.pt"
     train_records = [record for record in records if record.slot_id in set(split["train"])]
     policy_train = save_policy_checkpoint(
         policy_path,
         train_records,
         embeddings,
+        perception_model=perception_model,
         entity_embedding_runtime=entity_embedding_runtime,
         camera_profile=profile,
     )
@@ -125,6 +127,7 @@ def main() -> None:
             records,
             embeddings,
             set(split["validation"]),
+            perception_model=perception_model,
             entity_embedding_runtime=entity_embedding_runtime,
             camera_profile=profile,
         ),
@@ -133,9 +136,11 @@ def main() -> None:
             records,
             embeddings,
             set(split["test"]),
+            perception_model=perception_model,
             entity_embedding_runtime=entity_embedding_runtime,
             camera_profile=profile,
         ),
+        "training_geometry": "online_perception",
         "qwen_embeddings_sha256": hashlib.sha256(EMBEDDING_PATH.read_bytes()).hexdigest(),
         "offline_probes": {
             "cold_start_blue_5p5_3m": _probe(

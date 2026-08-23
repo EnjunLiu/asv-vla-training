@@ -12,6 +12,7 @@ from PIL import Image
 from sklearn.linear_model import Ridge
 
 from entity_embedding import EntityEmbeddingRuntime
+from online_perception import build_online_entity_cache, entities_for_record, task_embedding_for_record
 from perception import CameraProfile
 
 from decision import (
@@ -346,14 +347,15 @@ def save_policy_checkpoint(
     train_records: list[EpisodeRecord],
     embeddings: Mapping[str, np.ndarray],
     *,
-    epochs: int = 80,
+    epochs: int = 120,
+    perception_model: ImageEntityModel | None = None,
     entity_embedding_runtime: EntityEmbeddingRuntime | None = None,
     camera_profile: CameraProfile | None = None,
 ) -> dict[str, float]:
     dataset = build_policy_dataset(
         train_records,
         embeddings,
-        distance_scales=(1.0, 1.25, 1.5, 2.0),
+        perception_model=perception_model,
         entity_embedding_runtime=entity_embedding_runtime,
         camera_profile=camera_profile,
     )
@@ -366,7 +368,7 @@ def save_policy_checkpoint(
         model.stop_head.bias.fill_(-5.0)
     model.stop_head.weight.requires_grad_(False)
     model.stop_head.bias.requires_grad_(False)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2.0e-3, weight_decay=1.0e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=8.0e-4, weight_decay=1.0e-4)
     language = torch.from_numpy(dataset["language"])
     geometry = torch.from_numpy(dataset["entity_geometry"])
     ego = torch.from_numpy(dataset["ego_state"])
@@ -423,33 +425,35 @@ def save_policy_checkpoint(
 
 def _entities_with_embeddings(
     record: EpisodeRecord,
+    items: list[dict[str, Any]],
     *,
     entity_embedding_runtime: EntityEmbeddingRuntime | None,
     camera_profile: CameraProfile,
 ) -> list[dict[str, Any]]:
-    items = [dict(item) for item in record.entities]
+    enriched = [dict(item) for item in items]
     if entity_embedding_runtime is None:
-        return items
+        return enriched
     encoded = entity_embedding_runtime.encode_entities(
         Image.open(record.image_path).convert("RGB"),
-        items,
+        enriched,
         camera_profile,
     )
-    for item in items:
+    for item in enriched:
         entity_id = str(item["entity_id"])
         item["entity_embedding"] = encoded.get(
             entity_id, np.zeros(ENTITY_EMBEDDING_DIM, dtype=np.float32)
         ).tolist()
-    return items
+    return enriched
 
 
 def build_policy_dataset(
     records: list[EpisodeRecord],
     embeddings: Mapping[str, np.ndarray],
     *,
-    distance_scales: tuple[float, ...] = (1.0,),
+    perception_model: ImageEntityModel | None = None,
     entity_embedding_runtime: EntityEmbeddingRuntime | None = None,
     camera_profile: CameraProfile | None = None,
+    use_gt_entities: bool = False,
 ) -> dict[str, np.ndarray]:
     language_rows: list[np.ndarray] = []
     geometry_rows: list[np.ndarray] = []
@@ -460,6 +464,13 @@ def build_policy_dataset(
     task_ids: list[str] = []
     window_actions = control_window_actions(records)
     profile = camera_profile or CameraProfile()
+    entity_cache = None
+    if not use_gt_entities and perception_model is not None:
+        entity_cache = build_online_entity_cache(
+            records,
+            model=perception_model,
+            embeddings=embeddings,
+        )
     for record, window_action in zip(records, window_actions):
         if record.action is None:
             raise ValueError(
@@ -467,98 +478,64 @@ def build_policy_dataset(
             )
         if window_action is None:
             continue
-        if not distance_scales or any(scale <= 0.0 for scale in distance_scales):
-            raise ValueError("distance scales must be positive")
+        if use_gt_entities or perception_model is None:
+            online_items = [dict(item) for item in record.entities]
+        else:
+            online_items = entities_for_record(
+                record,
+                model=perception_model,
+                task_embedding=task_embedding_for_record(record, embeddings),
+                profile=profile,
+                entity_cache=entity_cache,
+            )
         base_items = _entities_with_embeddings(
             record,
+            online_items,
             entity_embedding_runtime=entity_embedding_runtime,
             camera_profile=profile,
         )
-        for scale in distance_scales:
-            scaled_items = [dict(item) for item in base_items]
-            for item in scaled_items:
-                position = np.asarray(item["relative_position_m"], dtype=np.float32)
-                item["relative_position_m"] = (position * float(scale)).tolist()
-            entities = [EntityObject(item) for item in scaled_items]
-            features = build_entity_features(entities)
-            surge = float(record.ego.get("surge_velocity_mps", 0.0))
-            yaw_rate = float(record.ego.get("yaw_rate_radps", 0.0))
-            by_id = {str(item["entity_id"]): item for item in scaled_items}
-            key = task_key(record.task_text)
-            color = "blue" if key.startswith("blue") else "red"
-            target_id = f"target_{color}"
-            if target_id not in by_id:
-                raise ValueError(f"missing selected target for task {key}")
-            relative_xy = np.asarray(
-                by_id[target_id]["relative_position_m"][:2], dtype=np.float32
-            )
-            standoff_m = 4.0 if key.endswith("4m") else 3.0
-            distance_error = float(np.linalg.norm(relative_xy)) - float(standoff_m)
-            if float(scale) != 1.0 or distance_error > FAR_ERROR_THRESHOLD_M:
-                # Cold-start / augmented far view: chase at full 0.50 m without
-                # requiring the boat to already have surge.
-                target_action = teacher_action(relative_xy, standoff_m, 0.0, 0.0)
-                ego = np.zeros(2, dtype=np.float32)
-            else:
-                # Keep expert window labels inside the near-standoff band. The
-                # mid-range teacher rewrite regressed RED/BLUE 3 m online while
-                # language stamping alone fixed RED 4 m.
-                target_action = np.asarray(window_action, dtype=np.float32)
-                ego = np.asarray((surge / 5.0, yaw_rate), dtype=np.float32)
-            language_rows.append(stamp_language_standoff(embeddings[key], standoff_m))
-            geometry_rows.append(features.features.astype(np.float32))
-            geometry_masks.append(features.mask.astype(bool))
-            ego_rows.append(ego)
-            actions.append(target_action)
-            slot_ids.append(record.slot_id)
-            task_ids.append(key)
+        key = task_key(record.task_text)
+        color = "blue" if key.startswith("blue") else "red"
+        target_id = f"target_{color}"
+        by_id = {str(item["entity_id"]): item for item in base_items}
+        if target_id not in by_id:
+            continue
+        standoff_m = 4.0 if key.endswith("4m") else 3.0
+        entities = [EntityObject(item) for item in base_items]
+        features = build_entity_features(entities)
+        surge = float(record.ego.get("surge_velocity_mps", 0.0))
+        yaw_rate = float(record.ego.get("yaw_rate_radps", 0.0))
+        target_action = np.asarray(window_action, dtype=np.float32)
+        ego = np.asarray((surge / 5.0, yaw_rate), dtype=np.float32)
+        language_rows.append(stamp_language_standoff(embeddings[key], standoff_m))
+        geometry_rows.append(features.features.astype(np.float32))
+        geometry_masks.append(features.mask.astype(bool))
+        ego_rows.append(ego)
+        actions.append(target_action)
+        slot_ids.append(record.slot_id)
+        task_ids.append(key)
 
-            # Online perception may publish only the selected target. Keep a
-            # second view of the same labeled state so the policy learns the
-            # target-only mask without changing geometry or action semantics.
-            target_index = next(
-                (
-                    index
-                    for index, entity_id in enumerate(features.entity_ids)
-                    if entity_id == f"target_{color}"
-                ),
-                None,
-            )
-            if target_index is None:
-                raise ValueError(f"target feature missing for task {key}")
-            target_only_mask = np.zeros_like(features.mask, dtype=bool)
-            target_only_mask[target_index] = True
-            geometry_masks.append(target_only_mask)
-            language_rows.append(stamp_language_standoff(embeddings[key], standoff_m))
-            geometry_rows.append(features.features.astype(np.float32))
-            ego_rows.append(ego)
-            actions.append(target_action.copy())
-            slot_ids.append(record.slot_id)
-            task_ids.append(key)
-
-            # Keep expert labels above, but also teach a cruise-floor chase for
-            # the common 0.4-1.0 m lag band that froze online at ~4.2 m.
-            if (
-                float(scale) == 1.0
-                and LAG_TEACHER_ERROR_M < distance_error <= FAR_ERROR_THRESHOLD_M
-            ):
-                chase_surge = max(float(surge), CRUISE_SURGE_MPS)
-                chase_action = teacher_action(
-                    relative_xy, standoff_m, chase_surge, yaw_rate
-                )
-                chase_ego = np.asarray(
-                    (chase_surge / 5.0, yaw_rate), dtype=np.float32
-                )
-                for mask in (features.mask.astype(bool), target_only_mask):
-                    language_rows.append(
-                        stamp_language_standoff(embeddings[key], standoff_m)
-                    )
-                    geometry_rows.append(features.features.astype(np.float32))
-                    geometry_masks.append(mask)
-                    ego_rows.append(chase_ego.copy())
-                    actions.append(chase_action.copy())
-                    slot_ids.append(record.slot_id)
-                    task_ids.append(key)
+        target_index = next(
+            (
+                index
+                for index, entity_id in enumerate(features.entity_ids)
+                if entity_id == target_id
+            ),
+            None,
+        )
+        if target_index is None:
+            continue
+        target_only_mask = np.zeros_like(features.mask, dtype=bool)
+        target_only_mask[target_index] = True
+        geometry_masks.append(target_only_mask)
+        language_rows.append(stamp_language_standoff(embeddings[key], standoff_m))
+        geometry_rows.append(features.features.astype(np.float32))
+        ego_rows.append(ego.copy())
+        actions.append(target_action.copy())
+        slot_ids.append(record.slot_id)
+        task_ids.append(key)
+    if not language_rows:
+        raise ValueError("policy dataset is empty after online perception filtering")
     return {
         "language": np.stack(language_rows),
         "entity_geometry": np.stack(geometry_rows),

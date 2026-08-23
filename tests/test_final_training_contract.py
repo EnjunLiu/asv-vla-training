@@ -184,7 +184,7 @@ def test_policy_dataset_matches_final_tensor_contract() -> None:
     embeddings = load_language_embeddings(
         Path("D:/asv-vla-training/data/qwen_final_embeddings.npz")
     )
-    dataset = build_policy_dataset(records, embeddings, distance_scales=(1.0,))
+    dataset = build_policy_dataset(records, embeddings, use_gt_entities=True)
     assert dataset["language"].shape == (4, 256)
     assert dataset["entity_geometry"].shape == (4, 16, ENTITY_FEATURE_DIM)
     assert dataset["ego_state"].shape == (4, 2)
@@ -210,7 +210,7 @@ def test_policy_dataset_uses_recorded_action_and_real_ego() -> None:
         Path("D:/asv-vla-training/data/qwen_final_embeddings.npz")
     )
 
-    dataset = build_policy_dataset(records, embeddings, distance_scales=(1.0,))
+    dataset = build_policy_dataset(records, embeddings, use_gt_entities=True)
 
     assert dataset["language"].shape == (4, 256)
     assert dataset["action"].shape == (4, 2)
@@ -279,7 +279,7 @@ def test_control_window_actions_clips_accumulated_displacement() -> None:
     assert np.linalg.norm(labels[0]) <= 0.500001
 
 
-def test_policy_dataset_adds_teacher_labeled_recovery_distances() -> None:
+def test_policy_dataset_uses_expert_labels_without_teacher_rewrite() -> None:
     record = _with_target_xy(
         load_episode_records(
             Path("D:/asv-vla-training/data/episodes/moving_target_valid")
@@ -289,25 +289,23 @@ def test_policy_dataset_adds_teacher_labeled_recovery_distances() -> None:
     embeddings = load_language_embeddings(
         Path("D:/asv-vla-training/data/qwen_final_embeddings.npz")
     )
-    recovery = teacher_action(np.asarray([4.5, 0.0], dtype=np.float32), 3.0, 0.0, 0.0)
 
     dataset = build_policy_dataset(
-        _control_window_records(record), embeddings, distance_scales=(1.0, 1.5)
+        _control_window_records(record),
+        embeddings,
+        use_gt_entities=True,
     )
 
-    assert dataset["action"].shape == (8, 2)
+    assert dataset["action"].shape == (4, 2)
     np.testing.assert_allclose(dataset["action"][0], [0.30, -0.10])
     np.testing.assert_allclose(dataset["action"][1], [0.30, -0.10])
-    np.testing.assert_allclose(dataset["action"][2], recovery)
-    np.testing.assert_allclose(dataset["action"][3], recovery)
-    np.testing.assert_allclose(dataset["ego_state"][2], [0.0, 0.0])
-    np.testing.assert_allclose(dataset["ego_state"][3], [0.0, 0.0])
-    assert np.linalg.norm(recovery) <= 0.500001
-    assert dataset["task_id"].tolist() == ["blue_3m"] * 8
-    np.testing.assert_allclose(dataset["language"][0, -1], -1.0)
+    surge = float(record.ego.get("surge_velocity_mps", 0.0)) / 5.0
+    yaw = float(record.ego.get("yaw_rate_radps", 0.0))
+    np.testing.assert_allclose(dataset["ego_state"][0], [surge, yaw])
+    assert dataset["task_id"].tolist() == ["blue_3m"] * 4
 
 
-def test_policy_dataset_relabels_far_unscaled_samples_for_cold_start_chase() -> None:
+def test_policy_dataset_keeps_expert_labels_for_far_start_geometry() -> None:
     record = load_episode_records(
         Path("D:/asv-vla-training/data/episodes/moving_target_valid")
     )[0]
@@ -321,13 +319,20 @@ def test_policy_dataset_relabels_far_unscaled_samples_for_cold_start_chase() -> 
     embeddings = load_language_embeddings(
         Path("D:/asv-vla-training/data/qwen_final_embeddings.npz")
     )
-    expected = teacher_action(np.asarray([5.5, -0.34], dtype=np.float32), 3.0, 0.0, 0.0)
 
-    dataset = build_policy_dataset(_control_window_records(far_record), embeddings, distance_scales=(1.0,))
+    windows = _control_window_records(far_record, action=(0.30, -0.10))
+    expected = control_window_actions(windows)[0]
+
+    dataset = build_policy_dataset(
+        windows,
+        embeddings,
+        use_gt_entities=True,
+    )
 
     np.testing.assert_allclose(dataset["action"][0], expected)
-    np.testing.assert_allclose(dataset["ego_state"][0], [0.0, 0.0])
-    assert float(np.linalg.norm(expected)) >= 0.49
+    surge = float(far_record.ego.get("surge_velocity_mps", 0.0)) / 5.0
+    yaw = float(far_record.ego.get("yaw_rate_radps", 0.0))
+    np.testing.assert_allclose(dataset["ego_state"][0], [surge, yaw])
 
 
 def test_task_key_reads_chinese_color_and_distance() -> None:
@@ -370,17 +375,12 @@ def test_policy_dataset_keeps_expert_labels_inside_near_standoff_band() -> None:
     dataset = build_policy_dataset(
         _control_window_records(mid_record, action=(0.12, -0.04)),
         embeddings,
-        distance_scales=(1.0,),
+        use_gt_entities=True,
     )
 
-    # Two complete 0.5 s windows x (expert pair + lag-teacher pair) = 8 rows.
-    assert dataset["action"].shape[0] == 8
+    assert dataset["action"].shape[0] == 4
     np.testing.assert_allclose(dataset["action"][0], [0.30, -0.10])
     np.testing.assert_allclose(dataset["ego_state"][0], [0.12, 0.0])
-    expected = teacher_action(np.asarray([3.8, 0.0], dtype=np.float32), 3.0, 0.6, 0.0)
-    np.testing.assert_allclose(dataset["action"][2], expected)
-    np.testing.assert_allclose(dataset["ego_state"][2], [0.12, 0.0])
-    assert float(expected[0]) > 0.35
     np.testing.assert_allclose(dataset["language"][0, -1], -1.0)
 
 

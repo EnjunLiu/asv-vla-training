@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_UE_LOG = ROOT / "experiments/chase_standoff_entityfeat_v2/red_3m_ue_run2.log"
-DEFAULT_OUTPUT = ROOT / "experiments/chase_standoff_entityfeat_v2/red_3m_world_trace_run2.png"
+DEFAULT_UE_LOG = ROOT / "experiments/chase_standoff_entityfeat_v2/red_3m_ue.log"
+DEFAULT_OUTPUT = ROOT / "experiments/chase_standoff_entityfeat_v2/red_3m_world_trace.png"
 
 ASV_RE = re.compile(r"SCENE_ASV_POS t=([0-9.]+) world=X=([-0-9.]+) Y=([-0-9.]+)")
 TARGET_RE = re.compile(

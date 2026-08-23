@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-LOG = ROOT / "experiments/chase_standoff_entityfeat_v2/closed_loop_red3_entityfeat_v2_20260823.log"
+LOG = ROOT / "experiments/chase_standoff_entityfeat_v2/closed_loop_red3_entityfeat_v2.log"
 OUTPUT = ROOT / "experiments/chase_standoff_entityfeat_v2/closed_loop_red3_entityfeat_v2_trajectory.png"
 
 PAYLOAD_RE = re.compile(r"payload=(\{.*\})__OD_END__")
