@@ -5,7 +5,7 @@ LOG_NAME="${2:?log name required}"
 LOG="/home/jetson/jetson_asv_ws/logs/${LOG_NAME}"
 
 # Kill by numeric PID only. Pattern must match install/lib/vla/* entrypoints.
-mapfile -t PIDS < <(pgrep -f 'ros2 launch bringup vla_closed_loop|/install/lib/bridge/bridge_node|/install/lib/vla/language|/install/lib/vla/perception|/install/lib/vla/decision' || true)
+mapfile -t PIDS < <(pgrep -f 'ros2 launch bringup vla_closed_loop|/install/lib/bridge/bridge_node|/install/lib/vla/task|/install/lib/vla/perception|/install/lib/vla/decision' || true)
 if ((${#PIDS[@]})); then
   echo "KILL_PIDS ${PIDS[*]}"
   kill "${PIDS[@]}" 2>/dev/null || true
@@ -15,7 +15,7 @@ fi
 sleep 3
 
 for i in $(seq 1 30); do
-  left=$(pgrep -f '/install/lib/vla/(language|perception|decision)|bridge_node|ros2 launch bringup vla_closed_loop' || true)
+  left=$(pgrep -f '/install/lib/vla/(task|perception|decision)|bridge_node|ros2 launch bringup vla_closed_loop' || true)
   if [ -z "$left" ] && ! ss -lntp 2>/dev/null | grep -q ':8080'; then
     echo 8080_FREE
     break

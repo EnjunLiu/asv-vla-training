@@ -169,14 +169,27 @@ def perception_eval(model_path: Path, records, embeddings, slots):
     }
 
 
-def policy_eval(model_path: Path, records, embeddings, slots):
+def policy_eval(
+    model_path: Path,
+    records,
+    embeddings,
+    slots,
+    *,
+    entity_embedding_runtime=None,
+    camera_profile=None,
+):
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
     validate_policy_checkpoint(checkpoint)
     policy = SmallActionPolicy(SmallPolicyConfig.from_mapping(checkpoint["model_config"]))
     policy.load_state_dict(checkpoint["model_state_dict"], strict=True)
     policy.eval()
     selected = [record for record in records if record.slot_id in slots]
-    dataset = build_policy_dataset(selected, embeddings)
+    dataset = build_policy_dataset(
+        selected,
+        embeddings,
+        entity_embedding_runtime=entity_embedding_runtime,
+        camera_profile=camera_profile,
+    )
     with torch.inference_mode():
         output = policy(
             language=torch.from_numpy(dataset["language"]),

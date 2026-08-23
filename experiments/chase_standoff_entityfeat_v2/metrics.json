@@ -1,0 +1,92 @@
+{
+  "data_root": "D:\\asv-vla-training\\data\\episodes\\moving_target_valid",
+  "split": {
+    "train": [
+      "BLUE_3M_TRAIN_01",
+      "BLUE_3M_TRAIN_02",
+      "BLUE_3M_TRAIN_03",
+      "BLUE_3M_TRAIN_04",
+      "BLUE_3M_TRAIN_START_01",
+      "BLUE_3M_TRAIN_START_02",
+      "RED_3M_TRAIN_01",
+      "RED_3M_TRAIN_02",
+      "RED_3M_TRAIN_03",
+      "RED_3M_TRAIN_04",
+      "RED_3M_TRAIN_START_01",
+      "RED_3M_TRAIN_START_02",
+      "RED_4M_TRAIN_01",
+      "RED_4M_TRAIN_02",
+      "RED_4M_TRAIN_03",
+      "RED_4M_TRAIN_04",
+      "RED_4M_TRAIN_START_01",
+      "RED_4M_TRAIN_START_02"
+    ],
+    "validation": [
+      "BLUE_3M_VALIDATION",
+      "RED_3M_VALIDATION",
+      "RED_4M_VALIDATION"
+    ],
+    "test": [
+      "BLUE_3M_TEST",
+      "RED_3M_TEST",
+      "RED_4M_TEST"
+    ]
+  },
+  "entity_embedding_checkpoint": "D:\\asv-vla-training\\experiments\\chase_standoff_entityfeat_v2\\entity_embedding.pt",
+  "perception_copied_from": "D:\\asv-vla-training\\experiments\\chase_standoff_candidate",
+  "policy_train": {
+    "train_action_rmse_m": 0.018015656620264053,
+    "device": "cuda"
+  },
+  "policy_validation": {
+    "action_rmse_m": 0.013016208074986935,
+    "action_max_norm_m": 0.4949948191642761,
+    "samples": 2666,
+    "policy_driven_ratio": 1.0
+  },
+  "policy_test": {
+    "action_rmse_m": 0.012794218957424164,
+    "action_max_norm_m": 0.48848727345466614,
+    "samples": 2666,
+    "policy_driven_ratio": 1.0
+  },
+  "qwen_embeddings_sha256": "ecf9980f5a947adb26586a07ba73c3ea3814a6f9b030441357fcf6262dabc9cf",
+  "offline_probes": {
+    "cold_start_blue_5p5_3m": {
+      "action": [
+        0.4942491054534912,
+        -0.04879520833492279
+      ],
+      "norm_m": 0.49665191769599915,
+      "teacher": [
+        0.49904733896255493,
+        -0.030850201845169067
+      ],
+      "teacher_norm_m": 0.4999999701976776
+    },
+    "cold_start_red_5p2_4m": {
+      "action": [
+        0.35440510511398315,
+        0.004994016606360674
+      ],
+      "norm_m": 0.354440301656723,
+      "teacher": [
+        0.5,
+        0.0
+      ],
+      "teacher_norm_m": 0.5
+    },
+    "midrange_red_3p8_3m": {
+      "action": [
+        0.42242833971977234,
+        0.009803596884012222
+      ],
+      "norm_m": 0.4225420653820038,
+      "teacher": [
+        0.5,
+        0.0
+      ],
+      "teacher_norm_m": 0.5
+    }
+  }
+}

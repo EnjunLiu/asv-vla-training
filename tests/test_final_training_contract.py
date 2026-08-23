@@ -11,8 +11,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from train_final import (  # noqa: E402
     FINAL_SCHEMA,
-    POLICY_IGNORED_ENTITY_COLUMNS,
-    _zero_ignored_entity_columns,
     control_window_actions,
     build_policy_dataset,
     build_policy_checkpoint,
@@ -25,7 +23,13 @@ from train_final import (  # noqa: E402
     teacher_action,
     validate_policy_checkpoint,
 )
-from decision import SmallActionPolicy, SmallPolicyConfig  # noqa: E402
+from decision import (  # noqa: E402
+    ENTITY_EMBEDDING_DIM,
+    ENTITY_FEATURE_DIM,
+    ENTITY_GEOMETRY_DIM,
+    SmallActionPolicy,
+    SmallPolicyConfig,
+)
 
 
 def _control_window_records(record, action=(0.12, -0.04)):
@@ -182,7 +186,7 @@ def test_policy_dataset_matches_final_tensor_contract() -> None:
     )
     dataset = build_policy_dataset(records, embeddings, distance_scales=(1.0,))
     assert dataset["language"].shape == (4, 256)
-    assert dataset["entity_geometry"].shape == (4, 16, 16)
+    assert dataset["entity_geometry"].shape == (4, 16, ENTITY_FEATURE_DIM)
     assert dataset["ego_state"].shape == (4, 2)
     assert dataset["action"].shape == (4, 2)
     assert dataset["entity_geometry_mask"].shape == (4, 16)
@@ -380,38 +384,30 @@ def test_policy_dataset_keeps_expert_labels_inside_near_standoff_band() -> None:
     np.testing.assert_allclose(dataset["language"][0, -1], -1.0)
 
 
-def test_policy_checkpoint_is_invariant_to_tracker_velocity_noise() -> None:
-    import torch
+def test_policy_checkpoint_uses_entity_feature_contract() -> None:
+    checkpoint = build_policy_checkpoint()
+    validate_policy_checkpoint(checkpoint)
+    config = checkpoint["model_config"]
+    assert config["entity_geometry_dim"] == ENTITY_GEOMETRY_DIM
+    assert config["entity_embedding_dim"] == ENTITY_EMBEDDING_DIM
+    assert config["language_conditioned_entity_attention"] is True
+    assert config["entity_attention_mode"] == "language_only"
 
-    model = SmallActionPolicy(SmallPolicyConfig())
-    _zero_ignored_entity_columns(model)
-    language = torch.randn(1, 256)
-    geometry = torch.randn(1, 16, 16)
-    noisy = geometry.clone()
-    noisy[:, :, list(POLICY_IGNORED_ENTITY_COLUMNS)] = torch.randn(
-        1, 16, len(POLICY_IGNORED_ENTITY_COLUMNS)
-    ) * 100.0
-    ego = torch.randn(1, 2)
-    mask = torch.ones(1, 16, dtype=torch.bool)
-    valid = torch.ones(1, dtype=torch.bool)
 
-    first = model(
-        language=language,
-        entity_geometry=geometry,
-        ego_state=ego,
-        language_valid=valid,
-        entity_geometry_mask=mask,
-        ego_state_valid=valid,
-        policy_input_valid=valid,
-    ).action
-    second = model(
-        language=language,
-        entity_geometry=noisy,
-        ego_state=ego,
-        language_valid=valid,
-        entity_geometry_mask=mask,
-        ego_state_valid=valid,
-        policy_input_valid=valid,
-    ).action
+def test_entity_features_encode_velocity() -> None:
+    from decision import build_entity_features  # noqa: E402
 
-    torch.testing.assert_close(first, second, rtol=0.0, atol=1.0e-7)
+    class _Entity:
+        entity_id = "boat"
+        visible = True
+        valid = True
+        relative_x = 2.0
+        relative_y = 0.0
+        relative_velocity_x = 1.0
+        relative_velocity_y = -0.5
+        velocity_valid = True
+        entity_embedding = [0.0] * ENTITY_EMBEDDING_DIM
+
+    row = build_entity_features([_Entity()]).features[0]
+    assert row[2] > 0.0
+    assert row[3] < 0.0

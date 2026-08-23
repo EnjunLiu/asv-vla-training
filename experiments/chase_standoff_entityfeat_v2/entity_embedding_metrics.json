@@ -1,0 +1,39 @@
+{
+  "data_root": "D:\\asv-vla-training\\data\\episodes\\moving_target_valid",
+  "split": {
+    "train": [
+      "BLUE_3M_TRAIN_01",
+      "BLUE_3M_TRAIN_02",
+      "BLUE_3M_TRAIN_03",
+      "BLUE_3M_TRAIN_04",
+      "BLUE_3M_TRAIN_START_01",
+      "BLUE_3M_TRAIN_START_02",
+      "RED_3M_TRAIN_01",
+      "RED_3M_TRAIN_02",
+      "RED_3M_TRAIN_03",
+      "RED_3M_TRAIN_04",
+      "RED_3M_TRAIN_START_01",
+      "RED_3M_TRAIN_START_02",
+      "RED_4M_TRAIN_01",
+      "RED_4M_TRAIN_02",
+      "RED_4M_TRAIN_03",
+      "RED_4M_TRAIN_04",
+      "RED_4M_TRAIN_START_01",
+      "RED_4M_TRAIN_START_02"
+    ],
+    "validation": [
+      "BLUE_3M_VALIDATION",
+      "RED_3M_VALIDATION",
+      "RED_4M_VALIDATION"
+    ],
+    "test": [
+      "BLUE_3M_TEST",
+      "RED_3M_TEST",
+      "RED_4M_TEST"
+    ]
+  },
+  "crop_count": 19232,
+  "checkpoint": "D:\\asv-vla-training\\experiments\\chase_standoff_entityfeat_v2\\entity_embedding.pt",
+  "train_loss": 0.006689026486128569,
+  "train_accuracy": 0.995164309484193
+}

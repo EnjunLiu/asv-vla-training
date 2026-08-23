@@ -1,31 +1,18 @@
-"""Decision algorithm and ROS boundary for ASV displacement commands.
-
-The perception algorithm owns image understanding and temporal velocity:
-
-    camera -> perception -> structured entity tensor -> decision
-
-This node consumes ``TaskEmbedding``, tracked entities and the current
-``ASVState``, constructs its structured feature tensor, then publishes one
-bounded body-frame displacement for the next control interval. There is no
-trajectory horizon, global visual token, entity crop token or bbox input.
-"""
-
 from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
 import math
-from pathlib import Path
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Protocol, Sequence
 
 import numpy as np
 try:
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-    from interfaces.msg import ASVState, DesiredDisplacement, EntityArray, TaskEmbedding
-except ModuleNotFoundError:  # Allow the algorithm half to run in offline tests.
+    from interfaces.msg import ASVState, DesiredDisplacement, EntityStateArray, TaskEmbedding
+except ModuleNotFoundError:  # 允许算法部分在离线测试中运行。
     rclpy = None
 
     class Node:
@@ -42,21 +29,15 @@ except ModuleNotFoundError:  # Allow the algorithm half to run in offline tests.
         def __init__(self, **kwargs) -> None:
             self.settings = kwargs
 
-    ASVState = DesiredDisplacement = EntityArray = TaskEmbedding = Any
-
-import math
-from typing import Protocol
+    ASVState = DesiredDisplacement = EntityStateArray = TaskEmbedding = Any
 
 
-# ``HORIZON`` remains an offline/model constant.  It is intentionally not
-# part of the online ROS control contract: the policy adapter consumes the
-# frozen model output and publishes one displacement command per frame.
+# ``HORIZON`` 仅是离线/模型常量，不属于在线 ROS 控制合同。
 HORIZON = 20
 ACTION_DIM = 2
 DT_SEC = 0.5
 FRAME_ID = "base_link"
-# The trained decision head and online desired_x/desired_y contract share one
-# bounded single-step displacement.  The 0.2 s control interval is unchanged.
+# 训练决策头与在线 desired_x/desired_y 共用 0.5 秒周期的有界单步位移。
 MAX_DISPLACEMENT_M = 0.50
 SAFE_STOP_SOURCE = "safe_stop"
 FLOAT_TOLERANCE = 1.0e-6
@@ -81,12 +62,7 @@ def finite_zero(value: float, tolerance: float = FLOAT_TOLERANCE) -> bool:
 
 
 def is_safe_stop(message: DesiredDisplacementLike) -> bool:
-    """Validate a non-executable, single-point safe-stop marker.
-
-    A safe stop is deliberately invalid.  Downstream adapters must interpret
-    it as a hold, rather than as a valid zero displacement that could trigger
-    position-hold compensation in a physical controller.
-    """
+    """校验不可执行的单点安全停止标记。"""
 
     return (
         int(message.stamp_us) > 0
@@ -103,346 +79,15 @@ def is_safe_stop(message: DesiredDisplacementLike) -> bool:
 
 
 
-"""Image-only standoff guidance from normalized ``EntityFeatures``.
+POLICY_DRIVEN = "policy_driven"
+GUARD_FAIL_CLOSED = "fail_closed"
 
-This module is intentionally ROS-free.  It consumes only the entity IDs,
-mask, normalized geometry, and optional tracker velocity already present in a
-``EntityFeatures``-shaped object. UE truth entities are neither imported nor
-accepted as an input.
+
+"""单条在线机体位移的确定性安全门。
+
+安全门是 CUDA 策略与运动学控制器之间的唯一组件；校验当前 ``(desired_x, desired_y)``、
+检查单步碰撞包络，任何拒绝都安全关闭；不接受模型离线 [20, 2] 输出。
 """
-
-from dataclasses import dataclass
-import math
-import re
-from typing import Any, Sequence
-
-import numpy as np
-
-
-
-FEATURE_DIM = 16
-POSITION_SCALE_M = 20.0
-VELOCITY_SCALE_MPS = 5.0
-DEFAULT_STANDOFF_M = 3.0
-DEFAULT_GUARD_MAX_STEP_M = MAX_DISPLACEMENT_M
-# Keep the hold region narrow enough that the trained raw action remains the
-# default outside a small standoff tolerance.
-DEFAULT_DEADBAND_M = 0.20
-# A deadband may suppress numerical jitter, but it must not erase a meaningful
-# policy command while the target is moving through the standoff band.
-HOLD_ACTION_NORM_M = 0.02
-DEFAULT_PREDICTION_HORIZON_SEC = DT_SEC
-MAX_TARGET_DISTANCE_M = 20.0
-MAX_TARGET_SPEED_MPS = 5.0
-TARGET_IDS = ("target_red", "target_blue", "target_left", "target_right")
-
-# Backstop semantics: the learned policy drives the executed point; the
-# deterministic radial step only replaces a clearly reversed policy action.
-BACKSTOP_DOT_THRESHOLD = -0.25
-# Retained as a keyword-compatible parameter; action magnitude alone no
-# longer activates the backstop.
-BACKSTOP_ZERO_STEP_M = 1.0e-3
-
-# Guard outcomes returned by ``apply_standoff_guard``.
-GUARD_PASS_THROUGH = "pass_through"  # non-FOLLOW task, action unchanged
-GUARD_FAIL_CLOSED = "fail_closed"  # FOLLOW, target missing/OOD -> safe stop
-GUARD_BACKSTOP = "backstop"  # FOLLOW, policy step unsafe -> radial replacement
-GUARD_POLICY_DRIVEN = "policy_driven"  # FOLLOW, policy step kept
-GUARD_HOLD = "deadband_hold"  # FOLLOW, standoff deadband -> zero hold
-
-_DISTANCE_RE = re.compile(
-    r"(?<![\d.])([0-9]+(?:\.[0-9]+)?)\s*(?:m|米|meters?|metres?)",
-    re.IGNORECASE,
-)
-
-
-@dataclass(frozen=True)
-class TargetObservation:
-    """Finite image/tracker geometry in the vehicle ``base_link`` frame."""
-
-    entity_id: str
-    relative_x: float
-    relative_y: float
-    relative_velocity_x: float = 0.0
-    relative_velocity_y: float = 0.0
-    velocity_valid: bool = True
-
-    @property
-    def distance_m(self) -> float:
-        return math.hypot(self.relative_x, self.relative_y)
-
-
-def _instruction_text(entity_features: Any, instruction: str | None) -> str:
-    if instruction is not None:
-        return str(instruction).strip()
-    return str(getattr(entity_features, "instruction", "")).strip()
-
-
-def is_follow_instruction(instruction: str) -> bool:
-    """Return whether a task asks for FOLLOW-like standoff behavior."""
-
-    text = str(instruction).strip().casefold()
-    if not text or any(token in text for token in ("stop", "停止", "停船")):
-        return False
-    return any(
-        token in text
-        for token in ("follow", "track", "跟随", "跟踪", "追踪", "保持", "靠近")
-    )
-
-
-def target_id_from_instruction(instruction: str) -> str | None:
-    """Map color/bearing words to the canonical task-tensor entity ID."""
-
-    text = str(instruction).strip().casefold()
-    if not text:
-        return None
-    for target_id in TARGET_IDS:
-        if target_id in text:
-            return target_id
-    if any(token in text for token in ("red", "红", "赤")):
-        return "target_red"
-    if any(token in text for token in ("blue", "蓝")):
-        return "target_blue"
-    if any(token in text for token in ("left", "左")):
-        return "target_left"
-    if any(token in text for token in ("right", "右")):
-        return "target_right"
-    return None
-
-
-def desired_standoff_from_instruction(
-    instruction: str,
-    *,
-    default_m: float = DEFAULT_STANDOFF_M,
-) -> float:
-    """Parse ``3m``/``3米``/``10 meters`` with a safe 3 m default."""
-
-    default = float(default_m)
-    if not math.isfinite(default) or default <= 0.0:
-        raise ValueError("default standoff must be finite and positive")
-    match = _DISTANCE_RE.search(str(instruction))
-    if match is None:
-        return default
-    value = float(match.group(1))
-    if not math.isfinite(value) or value <= 0.0 or value > MAX_TARGET_DISTANCE_M:
-        return default
-    return value
-
-
-def _feature_row(entity_features: Any, index: int) -> np.ndarray | None:
-    try:
-        feature_dim = int(getattr(entity_features, "feature_dim", FEATURE_DIM))
-        max_entities = int(
-            getattr(
-                entity_features,
-                "max_entities",
-                len(getattr(entity_features, "entity_ids", [])),
-            )
-        )
-        values = np.asarray(entity_features.features, dtype=np.float64).reshape(
-            max_entities, feature_dim
-        )
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if feature_dim < 5 or index < 0 or index >= max_entities:
-        return None
-    return values[index]
-
-
-def extract_target_observation(
-    entity_features: Any,
-    instruction: str | None = None,
-) -> TargetObservation | None:
-    """Extract the instruction-selected, visible target from image features."""
-
-    text = _instruction_text(entity_features, instruction)
-    target_id = target_id_from_instruction(text)
-    if target_id is None or not bool(getattr(entity_features, "valid", False)):
-        return None
-    try:
-        entity_ids = [str(value).strip() for value in entity_features.entity_ids]
-        masks = [bool(value) for value in entity_features.mask]
-        index = entity_ids.index(target_id)
-    except (AttributeError, ValueError, TypeError):
-        return None
-    if index >= len(masks) or not masks[index]:
-        return None
-    row = _feature_row(entity_features, index)
-    if row is None or not np.all(np.isfinite(row[:5])):
-        return None
-    relative_x = float(row[0] * POSITION_SCALE_M)
-    relative_y = float(row[1] * POSITION_SCALE_M)
-    relative_velocity_x = float(row[3] * VELOCITY_SCALE_MPS)
-    relative_velocity_y = float(row[4] * VELOCITY_SCALE_MPS)
-    distance = math.hypot(relative_x, relative_y)
-    if not (
-        math.isfinite(distance)
-        and 0.05 <= relative_x <= MAX_TARGET_DISTANCE_M
-        and abs(relative_y) <= MAX_TARGET_DISTANCE_M
-        and distance <= MAX_TARGET_DISTANCE_M
-        and abs(relative_velocity_x) <= MAX_TARGET_SPEED_MPS
-        and abs(relative_velocity_y) <= MAX_TARGET_SPEED_MPS
-    ):
-        return None
-    return TargetObservation(
-        entity_id=target_id,
-        relative_x=relative_x,
-        relative_y=relative_y,
-        relative_velocity_x=relative_velocity_x,
-        relative_velocity_y=relative_velocity_y,
-        velocity_valid=True,
-    )
-
-
-def compute_standoff_step(
-    observation: TargetObservation,
-    desired_standoff_m: float = DEFAULT_STANDOFF_M,
-    *,
-    guard_max_step_m: float = DEFAULT_GUARD_MAX_STEP_M,
-    deadband_m: float = DEFAULT_DEADBAND_M,
-    prediction_horizon_sec: float = DEFAULT_PREDICTION_HORIZON_SEC,
-) -> tuple[float, float] | None:
-    """Return one bounded radial step toward/away from the predicted target."""
-
-    desired = float(desired_standoff_m)
-    max_step = float(guard_max_step_m)
-    deadband = float(deadband_m)
-    horizon = float(prediction_horizon_sec)
-    if not (
-        math.isfinite(desired)
-        and desired > 0.0
-        and math.isfinite(max_step)
-        and max_step >= 0.0
-        and math.isfinite(deadband)
-        and deadband >= 0.0
-        and math.isfinite(horizon)
-        and horizon >= 0.0
-    ):
-        return None
-    values = (
-        float(observation.relative_x),
-        float(observation.relative_y),
-        float(observation.relative_velocity_x),
-        float(observation.relative_velocity_y),
-    )
-    if not all(math.isfinite(value) for value in values):
-        return None
-    predicted_x = values[0]
-    predicted_y = values[1]
-    if observation.velocity_valid:
-        predicted_x += values[2] * horizon
-        predicted_y += values[3] * horizon
-    distance = math.hypot(predicted_x, predicted_y)
-    if not (
-        0.05 <= predicted_x <= MAX_TARGET_DISTANCE_M
-        and abs(predicted_y) <= MAX_TARGET_DISTANCE_M
-        and 0.05 <= distance <= MAX_TARGET_DISTANCE_M
-    ):
-        return None
-    error = distance - desired
-    if abs(error) <= deadband:
-        return 0.0, 0.0
-    step_norm = min(abs(error), max_step)
-    sign = 1.0 if error > 0.0 else -1.0
-    return (
-        float(sign * step_norm * predicted_x / distance),
-        float(sign * step_norm * predicted_y / distance),
-    )
-
-
-def apply_standoff_guard(
-    displacement: Sequence[float] | np.ndarray,
-    entity_features: Any,
-    *,
-    dot_threshold: float = BACKSTOP_DOT_THRESHOLD,
-    zero_step_m: float = BACKSTOP_ZERO_STEP_M,
-    deadband_m: float = DEFAULT_DEADBAND_M,
-) -> tuple[tuple[float, ...] | None, str]:
-    """Apply the learned-policy-first standoff backstop.
-
-    Returns ``(desired_displacement, reason)`` where ``reason`` is one of
-    ``GUARD_PASS_THROUGH`` / ``GUARD_FAIL_CLOSED`` / ``GUARD_BACKSTOP`` /
-    ``GUARD_POLICY_DRIVEN`` / ``GUARD_HOLD``.
-
-    - Non-FOLLOW tasks retain the finite policy displacement unchanged.
-    - A FOLLOW task with a missing/OOD target returns ``(None, GUARD_FAIL_CLOSED)``
-      so the caller can publish a safe stop.
-    - A FOLLOW task with a visible target keeps the policy's direct action
-      (the learned policy drives the executed command) unless the action
-      has a substantial reverse projection (``dot(action, target_dir) <
-      dot_threshold``, -0.25 m by default). Only then is it replaced by the
-      deterministic radial standoff action (``GUARD_BACKSTOP``). Lateral
-      geometry remains a decision-head responsibility; it does not silently
-      replace a valid learned action.
-    """
-
-    # ``zero_step_m`` is retained for callers of the previous interface.  A
-    # small but directionally correct learned action must now pass through.
-    _ = zero_step_m
-    try:
-        values = np.asarray(displacement, dtype=np.float64).reshape(-1)
-    except (TypeError, ValueError):
-        return None, GUARD_FAIL_CLOSED
-    if values.size != 2 or not np.all(np.isfinite(values)):
-        return None, GUARD_FAIL_CLOSED
-    instruction = _instruction_text(entity_features, None)
-    if not is_follow_instruction(instruction):
-        return tuple(float(value) for value in values), GUARD_PASS_THROUGH
-    observation = extract_target_observation(entity_features, instruction)
-    if observation is None:
-        return None, GUARD_FAIL_CLOSED
-    desired = desired_standoff_from_instruction(instruction)
-    try:
-        base_deadband = float(deadband_m)
-    except (TypeError, ValueError):
-        return None, GUARD_FAIL_CLOSED
-    if not math.isfinite(base_deadband) or base_deadband < 0.0:
-        return None, GUARD_FAIL_CLOSED
-    error = observation.distance_m - desired
-    effective_deadband = base_deadband
-    step = compute_standoff_step(
-        observation,
-        desired,
-        deadband_m=effective_deadband,
-    )
-    if step is None:
-        return None, GUARD_FAIL_CLOSED
-
-    # Only suppress a near-zero command inside the deadband. A meaningful raw
-    # action remains policy-driven so the controller can follow a moving target.
-    if abs(error) <= effective_deadband and np.linalg.norm(values) <= HOLD_ACTION_NORM_M:
-        values = values.copy()
-        values[:] = (0.0, 0.0)
-        return tuple(float(value) for value in values), GUARD_HOLD
-
-    first_step = values
-    target_dir = (observation.relative_x, observation.relative_y)
-    target_norm = math.hypot(*target_dir)
-    if target_norm <= 0.0:
-        return None, GUARD_FAIL_CLOSED
-    target_dir = (target_dir[0] / target_norm, target_dir[1] / target_norm)
-    dot_value = first_step[0] * target_dir[0] + first_step[1] * target_dir[1]
-    if dot_value < dot_threshold:
-        values = values.copy()
-        values[:] = step
-        return tuple(float(value) for value in values), GUARD_BACKSTOP
-    return tuple(float(value) for value in values), GUARD_POLICY_DRIVEN
-
-
-
-"""Deterministic safety gate for one online body-frame displacement.
-
-The gate is the only component between the CUDA policy and the kinematic
-controller.  It validates the current ``(desired_x, desired_y)`` command,
-checks its one-step collision envelope, and fails closed on every rejection.
-The model's offline [20, 2] output is not accepted at this boundary.
-"""
-
-from dataclasses import dataclass
-import math
-import time
-from typing import Any, Sequence
-
 
 PASS = "PASS"
 POLICY_STOP = "POLICY_STOP"
@@ -477,7 +122,7 @@ DEFAULT_COLLISION_MARGIN_M = 0.5
 
 @dataclass(frozen=True)
 class SafetyGateConfig:
-    """Limits for one body-frame command evaluated over ``dt``."""
+    """单条机体命令在 ``dt`` 内的限制。"""
 
     max_step_m: float = DEFAULT_MAX_STEP_M
     stale_timeout_sec: float = DEFAULT_STALE_TIMEOUT_SEC
@@ -513,7 +158,7 @@ def limit_displacement_rate(
     *,
     max_delta_m: float = DEFAULT_MAX_STEP_M,
 ) -> SafetyGateResult:
-    """Limit the change between consecutive executable displacements."""
+    """限制连续可执行位移之间的变化。"""
 
     if not result.valid or previous is None:
         return result
@@ -548,7 +193,7 @@ class _Entity:
 
 
 def _reject(code: str, detail: str = "") -> SafetyGateResult:
-    """Return a non-executable zero command for every rejected input."""
+    """对每个拒绝输入返回不可执行的零命令。"""
 
     return SafetyGateResult(
         desired_x=0.0,
@@ -574,7 +219,7 @@ def _check_modality_and_shape(
     entity_valid: bool,
     last_valid_stamp_us: int,
 ) -> str | None:
-    """Return a rejection code before any command is executed."""
+    """在执行命令前返回拒绝代码。"""
 
     if int(stamp_us) <= 0 or int(stamp_us) <= int(last_valid_stamp_us):
         return STALE_INPUT
@@ -603,7 +248,7 @@ def _check_kinematics(
     desired_y: float,
     config: SafetyGateConfig,
 ) -> str | None:
-    """Check the norm of the one-step displacement."""
+    """检查单步位移范数。"""
 
     norm = math.hypot(float(desired_x), float(desired_y))
     if not math.isfinite(norm):
@@ -634,7 +279,7 @@ def _check_collision(
     *,
     dt: float = DT_SEC,
 ) -> str | None:
-    """Check the one executed setpoint against constant-velocity entities."""
+    """将执行位移与恒速实体进行碰撞检查。"""
 
     for entity in entities:
         predicted_x = float(entity.relative_x) + float(entity.relative_vx) * float(dt)
@@ -669,7 +314,7 @@ def evaluate_safety_gate(
     time_since_last_valid_sec: float = 0.0,
     config: SafetyGateConfig | None = None,
 ) -> SafetyGateResult:
-    """Evaluate one body-frame displacement through the safety gate."""
+    """通过安全门评估一条机体位移。"""
 
     cfg = config or SafetyGateConfig()
     rejection = _check_modality_and_shape(
@@ -688,7 +333,7 @@ def evaluate_safety_gate(
     if rejection is not None:
         return _reject(rejection, reason)
 
-    # A stop is an invalid hold marker, never a valid zero action.
+    # stop 是无效保持标记，不是有效零动作。
     if safe_stop:
         return _reject(POLICY_STOP, reason or "policy requested stop")
 
@@ -733,7 +378,7 @@ def evaluate_safety_gate(
 
 
 
-"""Small multimodal policy with one bounded body-frame action output."""
+"""输出单条有界机体动作的轻量多模态策略。"""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -748,7 +393,9 @@ from torch import Tensor, nn
 class SmallPolicyConfig:
     language_dim: int = 256
     entity_count: int = 16
-    entity_geometry_dim: int = 16
+    entity_kinematic_dim: int = 4
+    entity_embedding_dim: int = 64
+    entity_geometry_dim: int = 68
     action_dim: int = 2
     ego_state_dim: int = 2
     language_hidden: int = 128
@@ -759,8 +406,8 @@ class SmallPolicyConfig:
     maximum_action_m: float = 0.5
     invalid_stop_logit: float = 20.0
     maximum_trainable_parameters: int = 2_000_000
-    language_conditioned_entity_attention: bool = False
-    entity_attention_mode: str = "legacy"
+    language_conditioned_entity_attention: bool = True
+    entity_attention_mode: str = "language_only"
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "SmallPolicyConfig":
@@ -785,6 +432,8 @@ class SmallPolicyConfig:
         positive_ints = (
             self.language_dim,
             self.entity_count,
+            self.entity_kinematic_dim,
+            self.entity_embedding_dim,
             self.entity_geometry_dim,
             self.action_dim,
             self.ego_state_dim,
@@ -797,6 +446,11 @@ class SmallPolicyConfig:
         )
         if any(value <= 0 for value in positive_ints):
             raise ValueError("all dimensions and parameter limits must be positive")
+        if self.entity_kinematic_dim + self.entity_embedding_dim != self.entity_geometry_dim:
+            raise ValueError(
+                "entity_geometry_dim must equal "
+                "entity_kinematic_dim + entity_embedding_dim"
+            )
         if self.action_dim != 2:
             raise ValueError("single-step body-frame action_dim must be 2")
         if self.ego_state_dim != 2:
@@ -824,13 +478,13 @@ class SmallPolicyConfig:
 
     @property
     def maximum_step_m(self) -> float:
-        """Compatibility spelling for callers that used the old bound."""
+        """兼容旧上限名称。"""
         return self.maximum_action_m
 
 
 @dataclass(frozen=True)
 class PolicyOutput:
-    """Policy tensors plus an explicit fail-closed sample-validity mask."""
+    """策略张量及显式安全关闭样本有效掩码。"""
 
     action: Tensor
     stop_logit: Tensor
@@ -847,7 +501,7 @@ def _mlp(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
 
 
 class SmallActionPolicy(nn.Module):
-    """Fuse language and structured entity geometry into one bounded action.
+    """融合语言和结构化实体几何，输出一条有界动作。
 
     The decision head receives task language, structured entity geometry and
     the current vessel dynamics. It does not receive the previous action or
@@ -862,16 +516,18 @@ class SmallActionPolicy(nn.Module):
         self.language_encoder = _mlp(
             cfg.language_dim, cfg.language_hidden, cfg.language_hidden
         )
-        self.entity_geometry_encoder = _mlp(
-            cfg.entity_geometry_dim,
+        self.entity_kinematic_encoder = _mlp(
+            cfg.entity_kinematic_dim,
+            cfg.entity_geometry_hidden,
+            cfg.entity_geometry_hidden,
+        )
+        self.entity_embedding_encoder = _mlp(
+            cfg.entity_embedding_dim,
             cfg.entity_geometry_hidden,
             cfg.entity_geometry_hidden,
         )
         self.entity_fusion = nn.Sequential(
-            nn.Linear(
-                cfg.entity_geometry_hidden,
-                cfg.entity_hidden,
-            ),
+            nn.Linear(cfg.entity_geometry_hidden * 2, cfg.entity_hidden),
             nn.GELU(),
         )
         self.ego_state_encoder = _mlp(
@@ -887,10 +543,9 @@ class SmallActionPolicy(nn.Module):
                 bias=False,
             )
         else:
-            # Keep the earlier state_dict format loadable.
+            # 保持旧版 state_dict 可加载。
             self.entity_language_query = None
-        # The validity bit is part of the decision input so a real zero action
-        # is distinguishable from the zero sentinel used at episode start.
+        # 有效位属于决策输入，用于区分真实零动作与回合初始零哨兵。
         fusion_input_dim = (
             cfg.language_hidden + cfg.entity_hidden + cfg.ego_state_hidden + 1
         )
@@ -1046,11 +701,16 @@ class SmallActionPolicy(nn.Module):
             ego_state.detach(), ego_mask & valid_mask, "ego_state"
         )
         language_token = self.language_encoder(language_clean)
-        entity_geometry_token = self.entity_geometry_encoder(
-            entity_geometry_clean
-        )
+        kinematic = entity_geometry_clean[..., : cfg.entity_kinematic_dim]
+        embedding = entity_geometry_clean[..., cfg.entity_kinematic_dim :]
         entity_token = self.entity_fusion(
-            entity_geometry_token
+            torch.cat(
+                (
+                    self.entity_kinematic_encoder(kinematic),
+                    self.entity_embedding_encoder(embedding),
+                ),
+                dim=-1,
+            )
         )
         ego_state_token = self.ego_state_encoder(ego_state_clean)
 
@@ -1061,9 +721,7 @@ class SmallActionPolicy(nn.Module):
                 entity_token * language_query.unsqueeze(1), dim=-1
             ) / (cfg.entity_hidden**0.5)
             mode = cfg.entity_attention_mode
-            # Earlier checkpoints predate the explicit mode field and
-            # used the additive form.  Preserve that behavior when its boolean
-            # flag is true and the new field retains the legacy default.
+            # 旧检查点没有显式 mode 字段，使用加法形式；保留其布尔标志行为。
             if mode in {"legacy", "language_additive"}:
                 attention_score = attention_score + language_score
             else:
@@ -1099,10 +757,7 @@ class SmallActionPolicy(nn.Module):
         )
         movement_gate = torch.sigmoid(-stop_logit)
         action = raw_action * radial_scale * cfg.maximum_action_m * movement_gate
-        # A positive STOP decision is an execution contract, not merely a
-        # request to move less. Keep the continuous gate above for useful
-        # training gradients, then make the published policy output exactly
-        # stationary whenever the classifier selects STOP.
+        # STOP 是执行合同，不只是少移动；发布时分类器选择 STOP 必须完全静止。
         movement_selected = (stop_logit < 0.0).view(batch_size, 1)
         action = torch.where(movement_selected, action, torch.zeros_like(action))
 
@@ -1140,12 +795,12 @@ _MASK_INPUT_NAMES = (
 
 
 class PolicyRuntimeError(RuntimeError):
-    """Raised when a policy checkpoint cannot satisfy the CUDA contract."""
+    """策略检查点不满足 CUDA 合同时抛出。"""
 
 
 @dataclass
 class TorchPolicyRunner:
-    """A checked, inference-only instance of the action policy."""
+    """经过校验、仅用于推理的动作策略实例。"""
 
     model: SmallActionPolicy
     config: SmallPolicyConfig
@@ -1156,7 +811,7 @@ class TorchPolicyRunner:
     def load(
         cls, model_path: str | Path, *, device: str = "cuda"
     ) -> "TorchPolicyRunner":
-        """Load a training checkpoint onto CUDA without a CPU fallback."""
+        """将训练检查点加载到 CUDA，不回退 CPU。"""
 
         requested = str(device).strip().lower()
         if requested != "cuda":
@@ -1176,8 +831,7 @@ class TorchPolicyRunner:
                     path, map_location="cpu", weights_only=True
                 )
             except TypeError:
-                # Torch versions before ``weights_only`` accepted only the
-                # map-location argument.  Validate before copying to CUDA.
+                # 旧版 Torch 只接受 map-location 参数；复制到 CUDA 前先校验。
                 checkpoint = torch.load(path, map_location="cpu")
             if not isinstance(checkpoint, Mapping):
                 raise PolicyRuntimeError("policy checkpoint must be a mapping")
@@ -1222,7 +876,7 @@ class TorchPolicyRunner:
     def run(
         self, inputs: Mapping[str, np.ndarray]
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Run one or more policy samples and return NumPy outputs."""
+        """执行一个或多个策略样本并返回 NumPy 输出。"""
 
         missing = [
             name for name in (*_FLOAT_INPUT_NAMES, *_MASK_INPUT_NAMES)
@@ -1289,76 +943,35 @@ __all__ = [
 
 DEFAULT_POLICY_BACKEND = "torch_cuda"
 POLICY_MODEL_VERSION = "vla_torch_cuda_ego_dynamics"
-ENTITY_COUNT = 16
 LANGUAGE_DIM = 256
-ENTITY_GEOMETRY_DIM = 16
 EGO_STATE_DIM = 2
-ENTITY_FEATURE_BACKEND = "deterministic_entity_tensor"
-POSITION_SCALE_M = 20.0
-HEIGHT_SCALE_M = 5.0
-VELOCITY_SCALE_MPS = 5.0
-RISK_HORIZON_SEC = 4.0
-RISK_RADIUS_M = 3.0
 STALE_SEC = 1.0
+try:
+    from .entity_contract import (
+        ENTITY_COUNT,
+        ENTITY_EMBEDDING_DIM,
+        ENTITY_FEATURE_DIM,
+        ENTITY_GEOMETRY_DIM,
+        ENTITY_KINEMATIC_DIM,
+        POSITION_SCALE_M,
+        VELOCITY_SCALE_MPS,
+    )
+except ImportError:
+    from entity_contract import (
+        ENTITY_COUNT,
+        ENTITY_EMBEDDING_DIM,
+        ENTITY_FEATURE_DIM,
+        ENTITY_GEOMETRY_DIM,
+        ENTITY_KINEMATIC_DIM,
+        POSITION_SCALE_M,
+        VELOCITY_SCALE_MPS,
+    )
 MIN_INFERENCE_INTERVAL_SEC = DT_SEC
 SYNC_CACHE_SIZE = 256
 SYNC_CACHE_TTL_SEC = 5.0
-SYNC_FAIL_PUBLISH_PERIOD_SEC = 1.0
 POLICY_MAX_STEP_M = MAX_DISPLACEMENT_M
 POLICY_MAX_ACTION_DELTA_M = 0.05
-POLICY_TRACE_LIMIT = 5
-POLICY_AUDIT_PERIOD = 100
-_POLICY_LANGUAGE_TABLE: dict[str, np.ndarray] | None = None
-_POLICY_LANGUAGE_TABLE_PATHS = (
-    Path("/home/jetson/jetson_asv_ws/models/qwen_final_embeddings.npz"),
-    Path("D:/asv-vla-training/data/qwen_final_embeddings.npz"),
-)
 
-
-def policy_task_key(text: str) -> str:
-    folded = str(text).casefold()
-    color = "blue" if "blue" in folded or "蓝" in text else "red"
-    distance = "4m" if "4m" in folded or "4 m" in folded or "4米" in text else "3m"
-    return f"{color}_{distance}"
-
-
-def stamp_language_standoff(embedding: np.ndarray, standoff_m: float) -> np.ndarray:
-    stamped = np.asarray(embedding, dtype=np.float32).copy()
-    if stamped.ndim != 1 or stamped.size < 1:
-        raise ValueError("language embedding must be a 1-D vector")
-    stamped[-1] = (float(standoff_m) - 3.5) / 0.5
-    return stamped
-
-
-def load_policy_language_table(
-    path: str | Path | None = None,
-) -> dict[str, np.ndarray]:
-    global _POLICY_LANGUAGE_TABLE
-    if path is None and _POLICY_LANGUAGE_TABLE is not None:
-        return _POLICY_LANGUAGE_TABLE
-    candidates = (Path(path),) if path is not None else _POLICY_LANGUAGE_TABLE_PATHS
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        data = np.load(candidate, allow_pickle=True)
-        ids = [str(value) for value in data["instruction_ids"]]
-        values = np.asarray(data["embeddings"], dtype=np.float32)
-        table = {key: values[index] for index, key in enumerate(ids)}
-        if path is None:
-            _POLICY_LANGUAGE_TABLE = table
-        return table
-    raise FileNotFoundError("policy language embedding table is missing")
-
-
-def condition_policy_language(embedding: np.ndarray, instruction: str) -> np.ndarray:
-    """Map live instructions onto the training-table embedding and stamp standoff."""
-
-    table = load_policy_language_table()
-    key = policy_task_key(instruction)
-    if key not in table:
-        raise KeyError(f"policy language table missing task {key}")
-    standoff_m = desired_standoff_from_instruction(instruction)
-    return stamp_language_standoff(table[key], standoff_m)
 
 LANG_QOS = QoSProfile(
     depth=10,
@@ -1369,11 +982,6 @@ LANG_QOS = QoSProfile(
 FrameKey = tuple[str, int, int]
 IDENTITY_FIELDS = ("run_id", "scene_seed", "frame_index")
 
-
-@dataclass(frozen=True)
-class _PendingAction:
-    stamp_us: int
-    action: tuple[float, float]
 
 
 @dataclass(frozen=True)
@@ -1387,30 +995,17 @@ class EntityFeaturesError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class EntityMetrics:
-    distance_m: float
-    bearing_sin: float
-    bearing_cos: float
-    closing_speed_mps: float
-    time_to_cpa_sec: float
-    cpa_distance_m: float
-    is_risk: bool
-
-
-@dataclass(frozen=True)
 class EntityFeaturesResult:
     features: np.ndarray
     mask: np.ndarray
     entity_ids: tuple[str, ...]
     entity_count: int
-    target_count: int
-    risk_count: int
     dropped_count: int
 
 
 @dataclass
 class DecisionEntityFrame:
-    """Internal structured entity tensor; never exposed as a ROS message."""
+    """内部结构化实体张量，不作为 ROS 消息暴露。"""
 
     stamp_us: int
     run_id: str
@@ -1434,69 +1029,58 @@ def _clip_feature(value: float, scale: float, low: float = -1.0) -> float:
     return float(np.clip(value / scale, low, 1.0))
 
 
-def compute_entity_metrics(entity: Any) -> EntityMetrics:
-    x, y = float(entity.relative_x), float(entity.relative_y)
-    vx, vy = float(entity.relative_velocity_x), float(entity.relative_velocity_y)
-    distance = math.hypot(x, y)
-    if distance > 1.0e-9:
-        bearing_sin, bearing_cos = y / distance, x / distance
-        closing_speed = -(x * vx + y * vy) / distance
-    else:
-        bearing_sin, bearing_cos, closing_speed = 0.0, 1.0, 0.0
-    speed_squared = vx * vx + vy * vy
-    raw_time_to_cpa = -(x * vx + y * vy) / speed_squared if speed_squared > 1.0e-12 else math.inf
-    time_to_cpa = min(max(raw_time_to_cpa, 0.0), RISK_HORIZON_SEC)
-    cpa_distance = math.hypot(x + vx * time_to_cpa, y + vy * time_to_cpa)
-    return EntityMetrics(
-        distance, bearing_sin, bearing_cos, closing_speed, time_to_cpa,
-        cpa_distance,
-        closing_speed > 0.0 and 0.0 < raw_time_to_cpa <= RISK_HORIZON_SEC
-        and cpa_distance <= RISK_RADIUS_M,
-    )
+def _entity_distance(entity: Any) -> float:
+    return math.hypot(float(entity.relative_x), float(entity.relative_y))
 
 
-def _entity_candidate(entity: Any) -> tuple[Any, str, EntityMetrics]:
+def _read_entity_embedding(entity: Any) -> np.ndarray:
+    raw = getattr(entity, "entity_embedding", None)
+    if raw is None:
+        return np.zeros(ENTITY_EMBEDDING_DIM, dtype=np.float32)
+    values = np.asarray(raw, dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return np.zeros(ENTITY_EMBEDDING_DIM, dtype=np.float32)
+    if values.size < ENTITY_EMBEDDING_DIM:
+        padded = np.zeros(ENTITY_EMBEDDING_DIM, dtype=np.float32)
+        padded[: values.size] = values
+        return padded
+    return values[:ENTITY_EMBEDDING_DIM].astype(np.float32, copy=False)
+
+
+def _entity_candidate(entity: Any) -> tuple[Any, str]:
     entity_id = str(entity.entity_id).strip()
     values = (
-        entity.relative_x, entity.relative_y, entity.relative_z,
-        entity.relative_velocity_x, entity.relative_velocity_y,
-        entity.relative_velocity_z,
+        entity.relative_x,
+        entity.relative_y,
+        entity.relative_velocity_x,
+        entity.relative_velocity_y,
     )
     if not entity_id:
         raise EntityFeaturesError("a valid visible entity has an empty entity_id")
     if not all(math.isfinite(float(value)) for value in values):
         raise EntityFeaturesError(f"entity {entity_id!r} contains NaN or Inf")
-    return entity, entity_id, compute_entity_metrics(entity)
+    embedding = _read_entity_embedding(entity)
+    if not np.all(np.isfinite(embedding)):
+        raise EntityFeaturesError(f"entity {entity_id!r} embedding is non-finite")
+    return entity, entity_id
 
 
-def _entity_sort_key(candidate: tuple[Any, str, EntityMetrics]) -> tuple[Any, ...]:
-    entity, entity_id, metrics = candidate
-    if bool(entity.is_target):
-        return 0, metrics.distance_m, entity_id
-    if metrics.is_risk:
-        return 1, metrics.cpa_distance_m, metrics.time_to_cpa_sec, metrics.distance_m, entity_id
-    return 2, metrics.distance_m, entity_id
+def _entity_sort_key(candidate: tuple[Any, str]) -> tuple[Any, ...]:
+    entity, entity_id = candidate
+    return _entity_distance(entity), entity_id
 
 
-def _entity_row(candidate: tuple[Any, str, EntityMetrics]) -> np.ndarray:
-    entity, _, metrics = candidate
-    color = str(entity.color).strip().casefold()
-    return np.asarray((
-        _clip_feature(float(entity.relative_x), POSITION_SCALE_M),
-        _clip_feature(float(entity.relative_y), POSITION_SCALE_M),
-        _clip_feature(float(entity.relative_z), HEIGHT_SCALE_M),
-        0.0,
-        0.0,
-        0.0,
-        _clip_feature(metrics.distance_m, POSITION_SCALE_M, 0.0),
-        metrics.bearing_sin, metrics.bearing_cos,
-        0.0,
-        0.0,
-        0.0,
-        float(bool(entity.is_target)), float(metrics.is_risk),
-        float(color in {"red", "红", "红色"}),
-        float(color in {"blue", "蓝", "蓝色"}),
-    ), dtype=np.float32)
+def _entity_row(entity: Any) -> np.ndarray:
+    row = np.zeros(ENTITY_FEATURE_DIM, dtype=np.float32)
+    row[0] = _clip_feature(float(entity.relative_x), POSITION_SCALE_M)
+    row[1] = _clip_feature(float(entity.relative_y), POSITION_SCALE_M)
+    velocity_valid = bool(getattr(entity, "velocity_valid", True))
+    vx = float(entity.relative_velocity_x) if velocity_valid else 0.0
+    vy = float(entity.relative_velocity_y) if velocity_valid else 0.0
+    row[2] = _clip_feature(vx, VELOCITY_SCALE_MPS)
+    row[3] = _clip_feature(vy, VELOCITY_SCALE_MPS)
+    row[ENTITY_KINEMATIC_DIM:] = _read_entity_embedding(entity)
+    return row
 
 
 def build_entity_features(entities: Iterable[Any]) -> EntityFeaturesResult:
@@ -1510,23 +1094,26 @@ def build_entity_features(entities: Iterable[Any]) -> EntityFeaturesResult:
         seen_ids.add(candidate[1])
         candidates.append(candidate)
     selected = sorted(candidates, key=_entity_sort_key)[:ENTITY_COUNT]
-    features = np.zeros((ENTITY_COUNT, ENTITY_GEOMETRY_DIM), dtype=np.float32)
+    features = np.zeros((ENTITY_COUNT, ENTITY_FEATURE_DIM), dtype=np.float32)
     mask = np.zeros(ENTITY_COUNT, dtype=np.bool_)
     entity_ids = [""] * ENTITY_COUNT
-    for index, candidate in enumerate(selected):
-        features[index], mask[index], entity_ids[index] = _entity_row(candidate), True, candidate[1]
+    for index, (entity, entity_id) in enumerate(selected):
+        features[index] = _entity_row(entity)
+        mask[index] = True
+        entity_ids[index] = entity_id
     if not np.all(np.isfinite(features)):
         raise EntityFeaturesError("entity features contain NaN or Inf")
     return EntityFeaturesResult(
-        features, mask, tuple(entity_ids), len(selected),
-        sum(bool(entity.is_target) for entity, _, _ in selected),
-        sum(metrics.is_risk for _, _, metrics in selected),
+        features,
+        mask,
+        tuple(entity_ids),
+        len(selected),
         max(0, len(candidates) - len(selected)),
     )
 
 
 def _identity_tuple(message: Any) -> tuple[str, int, int] | None:
-    """Return complete frame identity, or None when it cannot be trusted."""
+    """返回完整帧身份；无法信任时返回 None。"""
 
     try:
         run_id = str(getattr(message, "run_id")).strip()
@@ -1543,7 +1130,7 @@ def identity_mismatch_reason(
     language: Any,
     entities: Any,
 ) -> str | None:
-    """Validate task identity without treating language as a camera frame.
+    """校验任务身份，不把语言消息当作相机帧。
 
     ``TaskEmbedding`` is task-level: its ``run_id`` identifies the encoder
     provenance and its ``stamp_us`` is publication time.  Neither is compared
@@ -1570,29 +1157,6 @@ def identity_mismatch_reason(
     return None
 
 
-def entity_features_identity_reason(
-    message: Any,
-    previous_identity: FrameKey | None = None,
-) -> str | None:
-    """Validate EntityFeatures identity and monotonic same-run frame order."""
-
-    identity = _identity_tuple(message)
-    if identity is None:
-        return "IDENTITY_MISMATCH"
-    try:
-        stamp_us = int(getattr(message, "stamp_us"))
-    except (AttributeError, TypeError, ValueError):
-        return "IDENTITY_MISMATCH"
-    if stamp_us <= 0:
-        return "IDENTITY_MISMATCH"
-    if previous_identity is not None:
-        if (
-            identity[:2] == previous_identity[:2]
-            and identity[2] <= previous_identity[2]
-        ):
-            return "IDENTITY_MISMATCH"
-    return None
-
 
 def bound_policy_displacement(
     displacement: Sequence[float] | np.ndarray,
@@ -1601,7 +1165,7 @@ def bound_policy_displacement(
     valid: bool = True,
     max_step_m: float = POLICY_MAX_STEP_M,
 ) -> tuple[float, float] | None:
-    """Validate and norm-bound one direct ``[desired_x, desired_y]`` action."""
+    """校验并按范数限制一条 ``[desired_x, desired_y]`` 动作。"""
 
     if safe_stop or not valid:
         return None
@@ -1629,7 +1193,7 @@ def smooth_policy_displacement(
     max_step_m: float = POLICY_MAX_STEP_M,
     max_delta_m: float = POLICY_MAX_ACTION_DELTA_M,
 ) -> tuple[float, float] | None:
-    """Apply a bounded per-frame action change around the previous command.
+    """围绕上一条命令限制每帧动作变化。
 
     Delta smoothing is only meaningful when a previous command is available.
     Without one, return the bounded policy action directly.
@@ -1664,7 +1228,7 @@ def smooth_policy_displacement(
 
 
 class FrameSyncCache:
-    """Bounded, scene-isolated cache for structured entity frames."""
+    """按场景隔离的有界结构化实体帧缓存。"""
 
     def __init__(
         self,
@@ -1679,6 +1243,7 @@ class FrameSyncCache:
         self.cache_size = int(cache_size)
         self.ttl_sec = float(ttl_sec)
         self._entities: OrderedDict[FrameKey, _SyncEntry] = OrderedDict()
+        self._ego_states: OrderedDict[FrameKey, _SyncEntry] = OrderedDict()
         self._active_run: tuple[str, int] | None = None
 
     @staticmethod
@@ -1697,11 +1262,16 @@ class FrameSyncCache:
     def entity_size(self) -> int:
         return len(self._entities)
 
+    @property
+    def ego_size(self) -> int:
+        return len(self._ego_states)
+
     def keys(self) -> tuple[FrameKey, ...]:
         return tuple(self._entities.keys())
 
     def clear(self) -> None:
         self._entities.clear()
+        self._ego_states.clear()
 
     def put_entities(
         self, message: Any, received_at: float | None = None
@@ -1725,12 +1295,38 @@ class FrameSyncCache:
         entry = self._entities.get(key)
         return entry.message if entry is not None else None
 
+    def put_ego(
+        self, message: Any, received_at: float | None = None
+    ) -> tuple[FrameKey, bool]:
+        key = self.key_for(message)
+        run = (key[0], key[1])
+        switched = self._active_run is not None and run != self._active_run
+        if switched:
+            self.clear()
+        self._active_run = run
+        self._ego_states[key] = _SyncEntry(
+            message=message,
+            received_at=time.monotonic() if received_at is None else float(received_at),
+        )
+        self._ego_states.move_to_end(key)
+        while len(self._ego_states) > self.cache_size:
+            self._ego_states.popitem(last=False)
+        return key, switched
+
+    def ego_for(self, key: FrameKey) -> Any | None:
+        entry = self._ego_states.get(key)
+        return entry.message if entry is not None else None
+
     def expire(self, now: float | None = None) -> int:
         current = time.monotonic() if now is None else float(now)
         removed = 0
         for key, entry in tuple(self._entities.items()):
             if current - entry.received_at > self.ttl_sec:
                 del self._entities[key]
+                removed += 1
+        for key, entry in tuple(self._ego_states.items()):
+            if current - entry.received_at > self.ttl_sec:
+                del self._ego_states[key]
                 removed += 1
         return removed
 
@@ -1739,15 +1335,13 @@ class FrameSyncCache:
 
 
 class DecisionNode(Node):
-    """Run the language-conditioned decision head at the camera cadence."""
+    """按相机节拍运行语言条件决策头。"""
 
     def __init__(self, model_path: str = "") -> None:
         super().__init__("decision")
         self.declare_parameter("model_path", model_path)
         self.declare_parameter("device", "cuda")
-        self._language_released = bool(
-            self.declare_parameter("language_release_after_encode", False).value
-        )
+        
         self._backend = DEFAULT_POLICY_BACKEND
         policy_device = str(self.get_parameter("device").value).strip() or "cuda"
         self._frame_sync = FrameSyncCache(
@@ -1760,28 +1354,11 @@ class DecisionNode(Node):
         self._entities: DecisionEntityFrame | None = None
         self._last_out_stamp_us = 0
         self._last_inference_time = 0.0
-        self._last_sync_fail_time = 0.0
-        self._frame_seq = 0
-        self._policy_trace_count = 0
-        self._policy_audit_events = 0
-        self._policy_driven_count = 0
-        self._backstop_count = 0
-        self._hold_count = 0
-        self._fail_closed_count = 0
-        self._policy_stop_count = 0
-        self._policy_audit_shutdown_logged = False
-        self._last_audit_guard_reason = "none"
-        self._last_audit_raw_dx, self._last_audit_raw_dy = "nan", "nan"
-        self._last_audit_guarded_dx, self._last_audit_guarded_dy = "nan", "nan"
-        self._last_audit_final_dx, self._last_audit_final_dy = "nan", "nan"
-        self._inference_count = 0
         self._active_run: tuple[str, int] | None = None
-        self._retired_runs: set[tuple[str, int]] = set()
         self._last_entity_identity: FrameKey | None = None
         self._last_entity_frame_index = -1
         self._last_inferred_frame_index = -1
         self._last_gate_frame_index = -1
-        self._ego_state: ASVState | None = None
         self._safety_config = SafetyGateConfig(
             max_step_m=float(
                 self.declare_parameter(
@@ -1800,10 +1377,10 @@ class DecisionNode(Node):
         )
 
         self._lang_sub = self.create_subscription(
-            TaskEmbedding, "/vla/language_embedding", self._on_language, LANG_QOS
+            TaskEmbedding, "/vla/task_embedding", self._on_language, LANG_QOS
         )
         self._ent_sub = self.create_subscription(
-            EntityArray, "/vla/entities", self._on_entities, 10
+            EntityStateArray, "/vla/entities", self._on_entities, 10
         )
         self._ego_sub = self.create_subscription(
             ASVState, "/ue/asv_state", self._on_ego_state, 10
@@ -1834,148 +1411,21 @@ class DecisionNode(Node):
                 f"POLICY_LOAD_ERROR backend={self._backend} error={self._policy_load_error}"
             )
 
-        self._smooth_max_step_m = float(
-            self.declare_parameter(
-                "smoothing_max_step_m", POLICY_MAX_STEP_M
-            ).value
-        )
-        self._smooth_max_delta_m = float(
-            self.declare_parameter(
-                "smoothing_max_delta_m", POLICY_MAX_ACTION_DELTA_M
-            ).value
-        )
-
     def _clear_control_history(self) -> None:
         self._last_gate_frame_index = -1
 
     def _on_ego_state(self, message: ASVState) -> None:
-        """Subscribe to current vessel dynamics for the decision input."""
+        """订阅当前船体动力学，作为决策输入。"""
 
-        self._ego_state = message
+        self._frame_sync.put_ego(message)
 
     def _expire_cache(self) -> None:
         self._frame_sync.expire()
 
-    @staticmethod
-    def _audit_action(action: Sequence[float] | np.ndarray | None) -> tuple[str, str]:
-        if action is None:
-            return "nan", "nan"
-        try:
-            values = np.asarray(action, dtype=np.float64).reshape(-1)
-        except (TypeError, ValueError):
-            return "nan", "nan"
-        if values.size != ACTION_DIM or not np.all(np.isfinite(values)):
-            return "nan", "nan"
-        return f"{float(values[0]):.6f}", f"{float(values[1]):.6f}"
-
-    def _maybe_policy_audit(self, *, force: bool = False, trigger: str = "periodic") -> None:
-        events = int(self._policy_audit_events)
-        if not force and (events == 0 or events % POLICY_AUDIT_PERIOD != 0):
-            return
-        self.get_logger().info(
-            "POLICY_AUDIT "
-            f"trigger={trigger} events={events} "
-            f"policy_driven={int(self._policy_driven_count)} "
-            f"backstop={int(self._backstop_count)} "
-            f"hold={int(self._hold_count)} "
-            f"fail_closed={int(self._fail_closed_count)} "
-            f"policy_stop={int(self._policy_stop_count)} "
-            f"guard_reason={self._last_audit_guard_reason} "
-            f"raw_dx={self._last_audit_raw_dx} raw_dy={self._last_audit_raw_dy} "
-            f"guarded_dx={self._last_audit_guarded_dx} "
-            f"guarded_dy={self._last_audit_guarded_dy} "
-            f"final_dx={self._last_audit_final_dx} "
-            f"final_dy={self._last_audit_final_dy}"
-        )
-
-    def _record_guard_outcome(
-        self,
-        guard_reason: str,
-        *,
-        raw_action: Sequence[float] | np.ndarray | None = None,
-        guarded_action: Sequence[float] | np.ndarray | None = None,
-        final_action: Sequence[float] | np.ndarray | None = None,
-    ) -> None:
-        if guard_reason == GUARD_POLICY_DRIVEN:
-            self._policy_driven_count += 1
-        elif guard_reason == GUARD_BACKSTOP:
-            self._backstop_count += 1
-        elif guard_reason == GUARD_HOLD:
-            self._hold_count += 1
-        self._last_audit_guard_reason = str(guard_reason)
-        self._last_audit_raw_dx, self._last_audit_raw_dy = self._audit_action(
-            raw_action
-        )
-        self._last_audit_guarded_dx, self._last_audit_guarded_dy = self._audit_action(
-            guarded_action
-        )
-        self._last_audit_final_dx, self._last_audit_final_dy = self._audit_action(
-            final_action
-        )
-        self._policy_audit_events += 1
-        self._maybe_policy_audit()
-
-    def _record_fail_closed(
-        self,
-        *,
-        raw_action: Sequence[float] | np.ndarray | None = None,
-        reason: str = "",
-    ) -> None:
-        self._fail_closed_count += 1
-        if str(reason) == "POLICY_STOP":
-            self._policy_stop_count += 1
-        self._last_audit_guard_reason = GUARD_FAIL_CLOSED
-        self._last_audit_raw_dx, self._last_audit_raw_dy = self._audit_action(
-            raw_action
-        )
-        self._last_audit_guarded_dx, self._last_audit_guarded_dy = "nan", "nan"
-        self._last_audit_final_dx, self._last_audit_final_dy = "0.000000", "0.000000"
-        self._policy_audit_events += 1
-        self._maybe_policy_audit()
-
-    def _trace_policy_decision(
-        self,
-        ent: DecisionEntityFrame,
-        *,
-        policy_valid: bool,
-        stop: bool,
-        lang_valid: bool,
-        ent_valid: bool,
-        guard_result: str,
-        guard_reason: str,
-        raw_action: Sequence[float] | np.ndarray | None = None,
-        guarded_action: Sequence[float] | np.ndarray | None = None,
-        final_action: Sequence[float] | np.ndarray | None = None,
-    ) -> None:
-        if self._policy_trace_count >= POLICY_TRACE_LIMIT:
-            return
-        self._policy_trace_count += 1
-        raw_dx, raw_dy = self._audit_action(raw_action)
-        guarded_dx, guarded_dy = self._audit_action(guarded_action)
-        final_dx, final_dy = self._audit_action(final_action)
-        self.get_logger().info(
-            "POLICY_TRACE "
-            f"sample={self._policy_trace_count}/{POLICY_TRACE_LIMIT} "
-            f"run_id={ent.run_id} scene_seed={int(ent.scene_seed)} "
-            f"frame_index={int(ent.frame_index)} policy_valid={bool(policy_valid)} "
-            f"stop={bool(stop)} lang_valid={bool(lang_valid)} "
-            f"entity_valid={bool(ent_valid)} guard_result={guard_result} "
-            f"guard_reason={guard_reason} "
-            f"raw_dx={raw_dx} raw_dy={raw_dy} "
-            f"guarded_dx={guarded_dx} guarded_dy={guarded_dy} "
-            f"final_dx={final_dx} final_dy={final_dy} "
-            f"policy_driven={int(self._policy_driven_count)} "
-            f"backstop={int(self._backstop_count)} "
-            f"hold={int(self._hold_count)} "
-            f"fail_closed={int(self._fail_closed_count)} "
-            f"policy_stop={int(self._policy_stop_count)}"
-        )
-
     def _on_language(self, message: TaskEmbedding) -> None:
         task_key = str(getattr(message, "instruction", "")).strip()
         if self._language_task_key != task_key:
-            # A new instruction invalidates both queued frames and gate
-            # history. The next matching EntityFeatures frame starts cold.
+            # 新指令会使排队帧和保护历史失效；下一条匹配实体帧从冷状态开始。
             self._frame_sync.clear()
             self._last_entity_identity = None
             self._last_entity_frame_index = -1
@@ -1985,9 +1435,9 @@ class DecisionNode(Node):
         self._language = message
         self._language_stamp = time.monotonic()
         for key in self._frame_sync.keys():
-            self._maybe_infer(key, trigger="language")
+            self._maybe_infer(key)
 
-    def _new_entity_features(self, source: EntityArray) -> DecisionEntityFrame:
+    def _new_entity_features(self, source: EntityStateArray) -> DecisionEntityFrame:
         safety_entities = tuple(
             _Entity(
                 entity_id=str(entity.entity_id),
@@ -2018,7 +1468,7 @@ class DecisionNode(Node):
             safety_entities=safety_entities,
         )
 
-    def _on_entities(self, source: EntityArray) -> None:
+    def _on_entities(self, source: EntityStateArray) -> None:
         message = self._new_entity_features(source)
         if not source.valid:
             message.detail = f"INVALID_SOURCE:{source.detail}"
@@ -2035,8 +1485,7 @@ class DecisionNode(Node):
                 message.mask = result.mask.tolist()
                 message.valid = True
                 message.detail = (
-                    f"OK:selected={result.entity_count};targets={result.target_count};"
-                    f"risks={result.risk_count};dropped={result.dropped_count}"
+                    f"OK:selected={result.entity_count};dropped={result.dropped_count}"
                 )
             except (EntityFeaturesError, ValueError) as exc:
                 message.detail = f"{type(exc).__name__.upper()}:{exc}"
@@ -2048,31 +1497,16 @@ class DecisionNode(Node):
         self._entities = message
         now = time.monotonic()
         identity = _identity_tuple(message)
-        continuity_reason = entity_features_identity_reason(
-            message, self._last_entity_identity
-        )
-        if continuity_reason is not None:
-            self._frame_sync.clear()
-            self._clear_control_history()
-            self._last_entity_identity = identity
-            self._last_entity_frame_index = (
-                identity[2] if identity is not None else -1
-            )
-            self._last_inferred_frame_index = -1
-            self._publish_fail_closed(message, continuity_reason)
-            return
         if identity is None:
             self._publish_fail_closed(message, "IDENTITY_MISMATCH")
             return
-
-        run = identity[:2]
-        if self._active_run is not None and run != self._active_run:
-            if run in self._retired_runs:
-                self._frame_sync.clear()
-                self._clear_control_history()
-                self._publish_fail_closed(message, "IDENTITY_MISMATCH")
-                return
-            self._retired_runs.add(self._active_run)
+        if (
+            self._last_entity_identity is not None
+            and identity[:2] == self._last_entity_identity[:2]
+            and identity[2] <= self._last_entity_identity[2]
+        ):
+            self._publish_fail_closed(message, "IDENTITY_MISMATCH")
+            return
 
         if (
             self._language is not None
@@ -2087,6 +1521,7 @@ class DecisionNode(Node):
             return
 
         key, switched = self._frame_sync.put_entities(message, received_at=now)
+        run = identity[:2]
         if switched or self._active_run != run:
             self._active_run = run
             self._last_entity_frame_index = -1
@@ -2100,14 +1535,7 @@ class DecisionNode(Node):
             self._clear_control_history()
         self._last_entity_identity = identity
         self._last_entity_frame_index = identity[2]
-        self._inference_count += 1
-        if self._inference_count <= 5 or self._inference_count % 100 == 0:
-            self.get_logger().info(
-                f"ENT_IN_TRACE count={self._inference_count} "
-                f"frame_index={int(message.frame_index)} valid={bool(message.valid)} "
-                f"detail={str(message.detail)[:80]}"
-            )
-        self._maybe_infer(key, trigger="entities", now=now)
+        self._maybe_infer(key, now=now)
 
     def _new_output(self, ent: DecisionEntityFrame) -> DesiredDisplacement:
         message = DesiredDisplacement()
@@ -2129,8 +1557,6 @@ class DecisionNode(Node):
         *,
         raw_action: Sequence[float] | np.ndarray | None = None,
     ) -> None:
-        self._last_sync_fail_time = time.monotonic()
-        self._record_fail_closed(raw_action=raw_action, reason=reason)
         self._clear_control_history()
         message = self._new_output(ent)
         message.desired_x = 0.0
@@ -2139,13 +1565,11 @@ class DecisionNode(Node):
         message.valid = False
         message.reason = str(reason)
         self._pub.publish(message)
-        self._frame_seq += 1
 
     def _maybe_infer(
         self,
         key: FrameKey,
         *,
-        trigger: str,
         now: float | None = None,
     ) -> None:
         current = time.monotonic() if now is None else float(now)
@@ -2155,11 +1579,6 @@ class DecisionNode(Node):
         if ent is None:
             return
         if self._language is None:
-            return
-        if (
-            current - self._language_stamp > STALE_SEC
-            and not self._language_released
-        ):
             return
         identity_reason = identity_mismatch_reason(self._language, ent)
         if identity_reason is not None:
@@ -2174,7 +1593,7 @@ class DecisionNode(Node):
         message = self._new_output(ent)
         self._last_inferred_frame_index = int(ent.frame_index)
 
-        ego = self._ego_state
+        ego = self._frame_sync.ego_for(key)
         if ego is None or _identity_tuple(ego) != key or not bool(ego.valid):
             self._publish_fail_closed(ent, "MISSING_OR_MISMATCHED_EGO_STATE")
             return
@@ -2212,52 +1631,11 @@ class DecisionNode(Node):
         stop = float(stop_logit[0, 0]) >= 0.0
         if stop or not policy_valid:
             self._publish_fail_closed(ent, "POLICY_STOP" if stop else "POLICY_INVALID")
-            self._trace_policy_decision(
-                ent,
-                policy_valid=policy_valid,
-                stop=stop,
-                lang_valid=bool(self._language.valid),
-                ent_valid=bool(ent.valid),
-                guard_result="skipped",
-                guard_reason="POLICY_STOP" if stop else "POLICY_INVALID",
-                raw_action=action[0],
-                final_action=(0.0, 0.0),
-            )
             return
 
-        displacement = bound_policy_displacement(
-            action[0], valid=True, max_step_m=self._smooth_max_step_m
-        )
+        displacement = bound_policy_displacement(action[0], valid=True)
         if displacement is None:
             self._publish_fail_closed(ent, "POLICY_ACTION_INVALID")
-            return
-        guarded, guard_reason = apply_standoff_guard(displacement, ent)
-        if guarded is None:
-            self._publish_fail_closed(
-                ent, "VISUAL_TARGET_MISSING", raw_action=action[0]
-            )
-            self._trace_policy_decision(
-                ent,
-                policy_valid=policy_valid,
-                stop=False,
-                lang_valid=bool(self._language.valid),
-                ent_valid=bool(ent.valid),
-                guard_result=GUARD_FAIL_CLOSED,
-                guard_reason=guard_reason,
-                raw_action=action[0],
-                final_action=(0.0, 0.0),
-            )
-            return
-
-        current_action = np.asarray(guarded, dtype=np.float32)
-        shaped = smooth_policy_displacement(
-            current_action,
-            previous_action=None,
-            max_step_m=self._smooth_max_step_m,
-            max_delta_m=self._smooth_max_delta_m,
-        )
-        if shaped is None:
-            self._publish_fail_closed(ent, "POLICY_SMOOTHING_INVALID")
             return
 
         safety = evaluate_safety_gate(
@@ -2266,8 +1644,8 @@ class DecisionNode(Node):
             frame_id=FRAME_ID,
             model_version=self._model_version,
             dt=DT_SEC,
-            desired_x=float(shaped[0]),
-            desired_y=float(shaped[1]),
+            desired_x=float(displacement[0]),
+            desired_y=float(displacement[1]),
             safe_stop=False,
             valid=True,
             reason="POLICY_INFERRED_SMOOTHED",
@@ -2279,34 +1657,15 @@ class DecisionNode(Node):
             config=self._safety_config,
         )
         if not safety.valid or safety.safe_stop:
-            self._publish_fail_closed(ent, safety.reason, raw_action=shaped)
+            self._publish_fail_closed(ent, safety.reason, raw_action=displacement)
             return
 
-        self._record_guard_outcome(
-            guard_reason,
-            raw_action=action[0],
-            guarded_action=guarded,
-            final_action=shaped,
-        )
-        message.desired_x = float(shaped[0])
-        message.desired_y = float(shaped[1])
+        message.desired_x = float(displacement[0])
+        message.desired_y = float(displacement[1])
         message.safe_stop = False
         message.valid = True
         message.reason = "POLICY_INFERRED_SMOOTHED"
-        self._trace_policy_decision(
-            ent,
-            policy_valid=True,
-            stop=False,
-            lang_valid=bool(self._language.valid),
-            ent_valid=bool(ent.valid),
-            guard_result=guard_reason,
-            guard_reason=guard_reason,
-            raw_action=action[0],
-            guarded_action=guarded,
-            final_action=shaped,
-        )
         self._pub.publish(message)
-        self._frame_seq += 1
 
     @staticmethod
     def _build_inputs(
@@ -2315,7 +1674,7 @@ class DecisionNode(Node):
         *,
         ego_state: ASVState,
     ) -> dict[str, np.ndarray]:
-        """Build language, entity and current-dynamics policy inputs."""
+        """构建语言、实体和当前动力学策略输入。"""
 
         identity_reason = identity_mismatch_reason(language, entities)
         if identity_reason is not None:
@@ -2323,9 +1682,6 @@ class DecisionNode(Node):
         embedding = np.asarray(language.embedding, dtype=np.float32).reshape(-1)
         if embedding.size != LANGUAGE_DIM or not np.all(np.isfinite(embedding)):
             raise ValueError("task embedding must be finite float32[256]")
-        embedding = condition_policy_language(embedding, str(language.instruction))
-        if embedding.size != LANGUAGE_DIM or not np.all(np.isfinite(embedding)):
-            raise ValueError("conditioned task embedding must be finite float32[256]")
         if int(entities.max_entities) != ENTITY_COUNT:
             raise ValueError("EntityFeatures max_entities does not match policy contract")
         if int(entities.feature_dim) != ENTITY_GEOMETRY_DIM:
@@ -2336,8 +1692,6 @@ class DecisionNode(Node):
         mask = np.asarray(entities.mask, dtype=bool).reshape(ENTITY_COUNT)
         if not np.all(np.isfinite(geometry[mask])):
             raise ValueError("active structured entity features are non-finite")
-        if not str(language.instruction).strip() == str(entities.instruction).strip() and str(entities.instruction).strip():
-            raise ValueError("language/entity instruction mismatch")
         ego_values = np.asarray(
             [
                 np.clip(float(ego_state.surge_velocity) / 5.0, -1.0, 1.0),
@@ -2357,11 +1711,6 @@ class DecisionNode(Node):
             "policy_input_valid": np.asarray([policy_valid], dtype=bool),
         }
 
-    def destroy_node(self) -> bool:
-        if not self._policy_audit_shutdown_logged:
-            self._policy_audit_shutdown_logged = True
-            self._maybe_policy_audit(force=True, trigger="shutdown")
-        return super().destroy_node()
 
 
 def main(args=None) -> None:

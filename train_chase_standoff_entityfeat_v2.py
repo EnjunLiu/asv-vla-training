@@ -20,6 +20,8 @@ from decision import (
     SmallPolicyConfig,
     build_entity_features,
 )
+from entity_embedding import EntityEmbeddingHead
+from perception import CameraProfile
 from train_final import (
     EntityObject,
     load_episode_records,
@@ -32,8 +34,9 @@ from train_final import (
 
 DATA = ROOT / "data/episodes/moving_target_valid"
 EMBEDDING_PATH = ROOT / "data/qwen_final_embeddings.npz"
-RUN = ROOT / "experiments/chase_standoff_entityfeat_v1"
+RUN = ROOT / "experiments/chase_standoff_entityfeat_v2"
 PERCEPTION_SOURCE = ROOT / "experiments/chase_standoff_candidate"
+ENTITY_EMBEDDING_PATH = RUN / "entity_embedding.pt"
 
 
 def _probe(policy, embeddings, template, *, xy, standoff, key, surge=0.0):
@@ -83,12 +86,28 @@ def main() -> None:
         source = PERCEPTION_SOURCE / name
         if source.is_file():
             shutil.copy2(source, RUN / name)
+    if not ENTITY_EMBEDDING_PATH.is_file():
+        raise SystemExit(
+            f"missing entity embedding checkpoint: {ENTITY_EMBEDDING_PATH}; "
+            "run scripts/train_entity_embedding_head.py first"
+        )
+
     records = load_episode_records(DATA)
     embeddings = load_language_embeddings(EMBEDDING_PATH)
     split = run_training.moving_target_split(records)
+    entity_embedding_runtime = EntityEmbeddingHead.load(
+        ENTITY_EMBEDDING_PATH, device="cuda"
+    )
+    profile = CameraProfile()
     policy_path = RUN / "policy.pt"
     train_records = [record for record in records if record.slot_id in set(split["train"])]
-    policy_train = save_policy_checkpoint(policy_path, train_records, embeddings)
+    policy_train = save_policy_checkpoint(
+        policy_path,
+        train_records,
+        embeddings,
+        entity_embedding_runtime=entity_embedding_runtime,
+        camera_profile=profile,
+    )
     checkpoint = torch.load(policy_path, map_location="cpu", weights_only=True)
     policy = SmallActionPolicy(SmallPolicyConfig.from_mapping(checkpoint["model_config"]))
     policy.load_state_dict(checkpoint["model_state_dict"], strict=True)
@@ -98,13 +117,24 @@ def main() -> None:
     report = {
         "data_root": str(DATA),
         "split": split,
+        "entity_embedding_checkpoint": str(ENTITY_EMBEDDING_PATH),
         "perception_copied_from": str(PERCEPTION_SOURCE),
         "policy_train": policy_train,
         "policy_validation": run_training.policy_eval(
-            policy_path, records, embeddings, set(split["validation"])
+            policy_path,
+            records,
+            embeddings,
+            set(split["validation"]),
+            entity_embedding_runtime=entity_embedding_runtime,
+            camera_profile=profile,
         ),
         "policy_test": run_training.policy_eval(
-            policy_path, records, embeddings, set(split["test"])
+            policy_path,
+            records,
+            embeddings,
+            set(split["test"]),
+            entity_embedding_runtime=entity_embedding_runtime,
+            camera_profile=profile,
         ),
         "qwen_embeddings_sha256": hashlib.sha256(EMBEDDING_PATH.read_bytes()).hexdigest(),
         "offline_probes": {

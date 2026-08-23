@@ -11,8 +11,12 @@ import torch
 from PIL import Image
 from sklearn.linear_model import Ridge
 
+from entity_embedding import EntityEmbeddingRuntime
+from perception import CameraProfile
+
 from decision import (
-    ENTITY_GEOMETRY_DIM,
+    ENTITY_EMBEDDING_DIM,
+    ENTITY_FEATURE_DIM,
     ENTITY_COUNT,
     SmallActionPolicy,
     SmallPolicyConfig,
@@ -20,18 +24,31 @@ from decision import (
 )
 
 
-# Entity geometry remains a 16-column message contract. These tracker-derived
-# columns are excluded from policy learning because their frame-to-frame noise
-# was observed to flip the action direction during online follow.
-POLICY_IGNORED_ENTITY_COLUMNS = (3, 4, 5, 9, 10, 11)
+class EntityObject:
+    def __init__(self, value: Mapping[str, Any]) -> None:
+        self.entity_id = str(value["entity_id"])
+        self.class_name = str(value.get("class_name", ""))
+        self.color = str(value.get("color", ""))
+        self.is_target = bool(value.get("is_target", False))
+        self.visible = bool(value["visible"])
+        self.valid = bool(value["valid"])
+        self.relative_x, self.relative_y, self.relative_z = map(
+            float, value["relative_position_m"]
+        )
+        self.relative_velocity_x, self.relative_velocity_y, self.relative_velocity_z = map(
+            float, value["relative_velocity_mps"]
+        )
+        self.velocity_valid = bool(value.get("velocity_valid", True))
+        raw_embedding = value.get("entity_embedding")
+        if raw_embedding is None:
+            self.entity_embedding = [0.0] * ENTITY_EMBEDDING_DIM
+        else:
+            embedding = [float(item) for item in raw_embedding]
+            if len(embedding) < ENTITY_EMBEDDING_DIM:
+                embedding.extend([0.0] * (ENTITY_EMBEDDING_DIM - len(embedding)))
+            self.entity_embedding = embedding[:ENTITY_EMBEDDING_DIM]
 
 
-def _zero_ignored_entity_columns(model: SmallActionPolicy) -> None:
-    """Make the policy mathematically invariant to ignored entity columns."""
-
-    layer = model.entity_geometry_encoder[0]
-    with torch.no_grad():
-        layer.weight[:, list(POLICY_IGNORED_ENTITY_COLUMNS)] = 0.0
 from perception import (
     FEATURE_DIM,
     LANGUAGE_EMBEDDING_DIM,
@@ -67,22 +84,6 @@ class EpisodeRecord:
     ego: Mapping[str, Any]
     entities: tuple[Mapping[str, Any], ...]
     action: tuple[float, float] | None = None
-
-
-class EntityObject:
-    def __init__(self, value: Mapping[str, Any]) -> None:
-        self.entity_id = str(value["entity_id"])
-        self.class_name = str(value["class_name"])
-        self.color = str(value["color"])
-        self.is_target = bool(value["is_target"])
-        self.visible = bool(value["visible"])
-        self.valid = bool(value["valid"])
-        self.relative_x, self.relative_y, self.relative_z = map(
-            float, value["relative_position_m"]
-        )
-        self.relative_velocity_x, self.relative_velocity_y, self.relative_velocity_z = map(
-            float, value["relative_velocity_mps"]
-        )
 
 
 def load_episode_records(root: str | Path) -> list[EpisodeRecord]:
@@ -346,18 +347,20 @@ def save_policy_checkpoint(
     embeddings: Mapping[str, np.ndarray],
     *,
     epochs: int = 80,
+    entity_embedding_runtime: EntityEmbeddingRuntime | None = None,
+    camera_profile: CameraProfile | None = None,
 ) -> dict[str, float]:
     dataset = build_policy_dataset(
-        train_records, embeddings, distance_scales=(1.0, 1.25, 1.5, 2.0)
+        train_records,
+        embeddings,
+        distance_scales=(1.0, 1.25, 1.5, 2.0),
+        entity_embedding_runtime=entity_embedding_runtime,
+        camera_profile=camera_profile,
     )
     torch.manual_seed(20260819)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = SmallPolicyConfig(
-        language_conditioned_entity_attention=True,
-        entity_attention_mode="language_only",
-    )
+    config = SmallPolicyConfig()
     model = SmallActionPolicy(config).to(device)
-    _zero_ignored_entity_columns(model)
     with torch.no_grad():
         model.stop_head.weight.zero_()
         model.stop_head.bias.fill_(-5.0)
@@ -394,7 +397,6 @@ def save_policy_checkpoint(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            _zero_ignored_entity_columns(model)
     model.eval()
     with torch.inference_mode():
         predictions = []
@@ -419,11 +421,35 @@ def save_policy_checkpoint(
     return {"train_action_rmse_m": rmse, "device": device.type}
 
 
+def _entities_with_embeddings(
+    record: EpisodeRecord,
+    *,
+    entity_embedding_runtime: EntityEmbeddingRuntime | None,
+    camera_profile: CameraProfile,
+) -> list[dict[str, Any]]:
+    items = [dict(item) for item in record.entities]
+    if entity_embedding_runtime is None:
+        return items
+    encoded = entity_embedding_runtime.encode_entities(
+        Image.open(record.image_path).convert("RGB"),
+        items,
+        camera_profile,
+    )
+    for item in items:
+        entity_id = str(item["entity_id"])
+        item["entity_embedding"] = encoded.get(
+            entity_id, np.zeros(ENTITY_EMBEDDING_DIM, dtype=np.float32)
+        ).tolist()
+    return items
+
+
 def build_policy_dataset(
     records: list[EpisodeRecord],
     embeddings: Mapping[str, np.ndarray],
     *,
     distance_scales: tuple[float, ...] = (1.0,),
+    entity_embedding_runtime: EntityEmbeddingRuntime | None = None,
+    camera_profile: CameraProfile | None = None,
 ) -> dict[str, np.ndarray]:
     language_rows: list[np.ndarray] = []
     geometry_rows: list[np.ndarray] = []
@@ -433,6 +459,7 @@ def build_policy_dataset(
     slot_ids: list[str] = []
     task_ids: list[str] = []
     window_actions = control_window_actions(records)
+    profile = camera_profile or CameraProfile()
     for record, window_action in zip(records, window_actions):
         if record.action is None:
             raise ValueError(
@@ -442,14 +469,18 @@ def build_policy_dataset(
             continue
         if not distance_scales or any(scale <= 0.0 for scale in distance_scales):
             raise ValueError("distance scales must be positive")
+        base_items = _entities_with_embeddings(
+            record,
+            entity_embedding_runtime=entity_embedding_runtime,
+            camera_profile=profile,
+        )
         for scale in distance_scales:
-            scaled_items = [dict(item) for item in record.entities]
+            scaled_items = [dict(item) for item in base_items]
             for item in scaled_items:
                 position = np.asarray(item["relative_position_m"], dtype=np.float32)
                 item["relative_position_m"] = (position * float(scale)).tolist()
             entities = [EntityObject(item) for item in scaled_items]
             features = build_entity_features(entities)
-            features.features[:, list(POLICY_IGNORED_ENTITY_COLUMNS)] = 0.0
             surge = float(record.ego.get("surge_velocity_mps", 0.0))
             yaw_rate = float(record.ego.get("yaw_rate_radps", 0.0))
             by_id = {str(item["entity_id"]): item for item in scaled_items}
