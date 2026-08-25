@@ -1,0 +1,74 @@
+{
+  "split": {
+    "train": [
+      "BLUE_3M_TRAIN_01",
+      "BLUE_3M_TRAIN_02",
+      "BLUE_3M_TRAIN_03",
+      "BLUE_3M_TRAIN_04",
+      "BLUE_3M_TRAIN_05",
+      "BLUE_3M_TRAIN_06",
+      "BLUE_3M_TRAIN_07",
+      "BLUE_3M_TRAIN_08",
+      "BLUE_3M_TRAIN_09",
+      "BLUE_3M_TRAIN_10",
+      "BLUE_3M_TRAIN_11",
+      "BLUE_3M_TRAIN_12",
+      "BLUE_3M_TRAIN_START_01",
+      "BLUE_3M_TRAIN_START_02",
+      "BLUE_3M_TRAIN_START_03",
+      "RED_3M_TRAIN_01",
+      "RED_3M_TRAIN_02",
+      "RED_3M_TRAIN_03",
+      "RED_3M_TRAIN_04",
+      "RED_3M_TRAIN_05",
+      "RED_3M_TRAIN_06",
+      "RED_3M_TRAIN_07",
+      "RED_3M_TRAIN_08",
+      "RED_3M_TRAIN_09",
+      "RED_3M_TRAIN_10",
+      "RED_3M_TRAIN_11",
+      "RED_3M_TRAIN_12",
+      "RED_3M_TRAIN_START_01",
+      "RED_3M_TRAIN_START_02",
+      "RED_3M_TRAIN_START_03",
+      "RED_4M_TRAIN_01",
+      "RED_4M_TRAIN_02",
+      "RED_4M_TRAIN_03",
+      "RED_4M_TRAIN_04",
+      "RED_4M_TRAIN_05",
+      "RED_4M_TRAIN_06",
+      "RED_4M_TRAIN_07",
+      "RED_4M_TRAIN_08",
+      "RED_4M_TRAIN_09",
+      "RED_4M_TRAIN_10",
+      "RED_4M_TRAIN_11",
+      "RED_4M_TRAIN_12",
+      "RED_4M_TRAIN_START_01",
+      "RED_4M_TRAIN_START_02",
+      "RED_4M_TRAIN_START_03"
+    ],
+    "validation": [
+      "BLUE_3M_VALIDATION",
+      "RED_3M_VALIDATION",
+      "RED_4M_VALIDATION"
+    ],
+    "test": [
+      "BLUE_3M_TEST",
+      "RED_3M_TEST",
+      "RED_4M_TEST"
+    ]
+  },
+  "control_dt_sec": 0.5,
+  "vision": {
+    "train_loss": 3.201027766408515e-06,
+    "epochs": 20.0,
+    "samples": 25857.0,
+    "slot_count": 4.0
+  },
+  "policy": {
+    "train_action_rmse_m": 0.0009813086362555623,
+    "train_action_y_rmse_m": 0.0006268955767154694,
+    "rows": 524792.0,
+    "max_entities": 16.0
+  }
+}

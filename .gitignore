@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
@@ -21,6 +21,7 @@ wandb/
 *.npz
 *.npy
 *.tmp
+*.bak
 
 # local ops / bulky experiment outputs
 WORKSPACE_CONTEXT.md

@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 TOPICS = ("/ue/camera_frame", "/ue/asv_state", "/ue/entities")
@@ -15,32 +15,70 @@ def _identity(message: Any) -> tuple[str, int, int]:
     return str(message.run_id), int(message.scene_seed), int(message.frame_index)
 
 
+def teacher_contract(
+    *,
+    follow_slot_index: int,
+    standoff_m: float,
+    embedding_key: str,
+) -> dict[str, Any]:
+    key = str(embedding_key).strip()
+    if not key:
+        raise ValueError("embedding_key must be non-empty")
+    if int(follow_slot_index) < 0:
+        raise ValueError("follow_slot_index must be non-negative")
+    return {
+        "follow_slot_index": int(follow_slot_index),
+        "standoff_m": float(standoff_m),
+        "embedding_key": key,
+    }
+
+
+def vision_contract(
+    entity_items: Sequence[Mapping[str, Any]],
+    *,
+    slot_entity_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    if slot_entity_ids is not None:
+        ids = [str(value).strip() for value in slot_entity_ids if str(value).strip()]
+    else:
+        ids = []
+        seen: set[str] = set()
+        for item in entity_items:
+            entity_id = str(item.get("entity_id", "")).strip()
+            if not entity_id or entity_id in seen:
+                continue
+            seen.add(entity_id)
+            ids.append(entity_id)
+    if not ids:
+        raise ValueError("vision.slot_entity_ids must be non-empty")
+    return {"slot_entity_ids": ids}
+
+
 def _entity(item: Any, ego: Any) -> dict[str, Any]:
+    """Passthrough UE entity fields; do not derive color/is_target in Python."""
+
     yaw = float(ego.yaw)
     cosine, sine = math.cos(yaw), math.sin(yaw)
     relative_x = float(item.relative_x)
     relative_y = float(item.relative_y)
     world_x = float(ego.position_x) + cosine * relative_x - sine * relative_y
     world_y = float(ego.position_y) + sine * relative_x + cosine * relative_y
-    return {
+    payload = {
         "entity_id": str(item.entity_id),
-        "class_name": str(item.class_name or "boat"),
-        "color": str(item.color or "other"),
-        "is_target": bool(item.is_target),
         "visible": bool(item.visible),
-        "relative_position_m": [relative_x, relative_y, float(item.relative_z)],
-        "world_position_m": [
-            world_x,
-            world_y,
-            float(ego.position_z) + float(item.relative_z),
-        ],
+        "relative_position_m": [relative_x, relative_y],
+        "world_position_m": [world_x, world_y],
         "relative_velocity_mps": [
             float(item.relative_velocity_x),
             float(item.relative_velocity_y),
-            float(item.relative_velocity_z),
         ],
         "valid": bool(item.valid),
     }
+    if hasattr(item, "color") and item.color is not None and str(item.color) != "":
+        payload["color"] = str(item.color)
+    if hasattr(item, "is_target"):
+        payload["is_target"] = bool(item.is_target)
+    return payload
 
 
 def _body_displacement(current: Any, following: Any) -> tuple[float, float]:
@@ -60,6 +98,10 @@ def export_decoded_frames(
     motion_state: str,
     *,
     source: str = "decoded_rosbag",
+    follow_slot_index: int = 0,
+    standoff_m: float = 3.0,
+    embedding_key: str = "",
+    slot_entity_ids: Sequence[str] | None = None,
 ) -> int:
     complete: list[tuple[tuple[str, int, int], Mapping[str, Any]]] = []
     for key, topics in decoded.items():
@@ -167,6 +209,13 @@ def export_decoded_frames(
         written.append(str(frame_index))
 
     run_id, scene_seed = next(iter(run_identities))
+    first_items = []
+    if written:
+        first_frame = json.loads(
+            (out / "frames" / f"{int(written[0]):012d}.json").read_text(encoding="utf-8")
+        )
+        first_items = first_frame.get("entities", {}).get("items", [])
+    key = embedding_key.strip() or task_text.strip()
     manifest = {
         "schema_version": "episode_manifest_v1",
         "run_id": run_id,
@@ -181,6 +230,12 @@ def export_decoded_frames(
         },
         "source": source,
         "task_text": task_text,
+        "teacher": teacher_contract(
+            follow_slot_index=follow_slot_index,
+            standoff_m=standoff_m,
+            embedding_key=key,
+        ),
+        "vision": vision_contract(first_items, slot_entity_ids=slot_entity_ids),
         "frames": written,
     }
     (out / "manifest.json").write_text(
@@ -218,6 +273,10 @@ def main() -> int:
     parser.add_argument("--slot", required=True)
     parser.add_argument("--layout", required=True)
     parser.add_argument("--motion", default="S2")
+    parser.add_argument("--follow-slot-index", type=int, default=0)
+    parser.add_argument("--standoff-m", type=float, default=3.0)
+    parser.add_argument("--embedding-key", default="")
+    parser.add_argument("--slot-entity-ids", nargs="*", default=None)
     args = parser.parse_args()
     count = export_decoded_frames(
         read_rosbag(args.bag),
@@ -227,6 +286,10 @@ def main() -> int:
         args.layout,
         args.motion,
         source=str(args.bag),
+        follow_slot_index=args.follow_slot_index,
+        standoff_m=args.standoff_m,
+        embedding_key=args.embedding_key,
+        slot_entity_ids=args.slot_entity_ids,
     )
     print(f"MOVING_TARGET_EPISODE_PASS frames={count} output={args.output}")
     return 0
