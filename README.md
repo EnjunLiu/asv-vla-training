@@ -1,63 +1,30 @@
-# ASV VLA Training（Windows only）
+# 面向 ASV 仿真的硬件在环实验平台 - 训练端
 
-PC 端采集、训练与闭环编排。**Jetson 在线推理源码不在本仓。**
+Windows 上的数据采集、策略训练与闭环编排。Jetson 在线推理源码不在本仓。
 
-| 端 | 路径 | 职责 |
-| --- | --- | --- |
-| 本仓 | `D:\asv-vla-training` | 数据集、`vision.pt` / `policy.pt` 训练、闭环编排 |
-| Jetson | `jetson@192.168.137.100:/home/jetson/jetson_asv_ws` | ROS2 推理 / 闭环 |
-| UE5 | `D:\asv-unreal-simulation` | 场景仿真 |
+## 功能接口
 
-事实入口：`WORKSPACE_CONTEXT.md`（三端同步）。
-
-## 当前验收（2026-08-25）
-
-三场景 mean abs standoff error < 1 m，产物在 `experiments/chase_standoff_tight_1m/`。
-
-| 场景 | mean abs |
+| 入口 | 说明 |
 | --- | --- |
-| RED 4m | 0.76 m |
-| BLUE 3m | 0.62 m |
-| RED 3m | 0.87 m |
-
-活动权重：`experiments/chase_standoff_tight_1m/{vision,policy}.pt`。
-
-## 布局
-
-| 路径 | 角色 |
-| --- | --- |
-| `src/train.py` | 训练入口（`vision` / `policy` / `all`） |
-| `src/data.py` | episode 加载、teacher 标签 |
-| `src/perception.py` | VisionModel（训练用） |
-| `src/decision.py` | ActionPolicy + `build_entity_states`（训练用） |
+| `src/train.py` | `vision` / `policy` / `all` 训练 |
 | `src/export_moving_target_bag.py` | bag → episode 导出 |
-| `scripts/run_closed_loop.py` | Windows 编排 UE + Jetson 闭环 |
-| `scripts/plot_trace.py` / `plot_track_world_2x3.py` | 跟踪图 |
-| `scripts/jetson_restart.sh` | 远程重启 Jetson 栈（scp 执行，不是 Jetson 源码） |
+| `scripts/run_closed_loop.py` | 编排 UE5 + Jetson 软件闭环 |
+| `scripts/plot_track_world_2x3.py` | 世界系轨迹与站位误差图 |
 | `scripts/collect_*.ps1` | 采集 |
-| `data/episodes/` | 本地 episode（不入库） |
-| `experiments/chase_standoff_tight_1m/` | 当前验收实验目录 |
 
-## 训练
+- 训练输入：episode 图像、任务嵌入、结构化实体、teacher 位移标签
+- 训练输出：`vision.pt` / `policy.pt`
+- 闭环编排：启动 UE 场景与 Jetson 栈，拉取日志并绘图
 
-```powershell
-cd D:\asv-vla-training
-python src/train.py all --out experiments/chase_standoff_tight_1m --device cuda
-```
+## 实现细节
 
-需要 Windows CUDA。Teacher 标签仅用于训练。单步位移上限 **0.55 m**。
+- Teacher 标签只用于训练；在线策略输出船体坐标系二维期望位移
+- 感知与决策网络与 Jetson 在线节点对齐，权重拷贝到 Jetson `models/` 后由 ROS 2 推理
+- 单步位移上限 0.55 m
+- 数据集、权重与实验日志不入库
 
-## 部署权重到 Jetson
+## 测试环境
 
-```powershell
-scp experiments/chase_standoff_tight_1m/vision.pt jetson@192.168.137.100:/home/jetson/jetson_asv_ws/models/vision.pt
-scp experiments/chase_standoff_tight_1m/policy.pt jetson@192.168.137.100:/home/jetson/jetson_asv_ws/models/policy.pt
-```
-
-在线节点源码只在 Jetson 仓库：`~/jetson_asv_ws/src/vla/`。
-
-## 闭环验收
-
-```powershell
-python scripts/run_closed_loop_acceptance.py --out experiments/chase_standoff_tight_1m --runtime 180
-```
+- Windows 11
+- Python 3.10+
+- CUDA

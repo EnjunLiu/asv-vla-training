@@ -5,8 +5,8 @@ $repo = "D:\asv-vla-training"
 $episodeRoot = Join-Path $repo "data\episodes\moving_target_valid"
 $rawRoot = Join-Path $repo "data\raw\startup"
 $remoteRoot = "/tmp/asv_moving_startup_20260820"
-$ue = "D:\Softwares\Unreal Engine\UE_5.6\Engine\Binaries\Win64\UnrealEditor.exe"
-$project = "D:\asv-unreal-simulation\VLA.uproject"
+$ue = "D:\Softwares\Unreal Engine\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe"
+$project = "D:\asv-unreal-simulation\HILPlatform.uproject"
 
 $scenarios = @(
     @{ Slot = "RED_3M_TRAIN_START_01"; Color = "red"; Distance = 3; Layout = "L7"; Seed = 232101 },

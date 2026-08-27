@@ -12,9 +12,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JETSON = "jetson@192.168.137.100"
-UE = Path(r"D:\Softwares\Unreal Engine\UE_5.6\Engine\Binaries\Win64\UnrealEditor.exe")
-UPROJECT = Path(r"D:\asv-unreal-simulation\VLA.uproject")
-UE_SAVED_LOG = UPROJECT.parent / "Saved/Logs/VLA.log"
+UE = Path(r"D:\Softwares\Unreal Engine\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe")
+UPROJECT = Path(r"D:\asv-unreal-simulation\HILPlatform.uproject")
+UE_SAVED_LOGS = (
+    UPROJECT.parent / "Saved/Logs/HILPlatform.log",
+    UPROJECT.parent / "Saved/Logs/VLA.log",
+)
 MARKERS = ("TASK_READY_VALID", "POLICY_READY")
 
 SCENARIOS = {
@@ -115,8 +118,10 @@ def main() -> int:
             ue.terminate()
             ue.wait(timeout=10)
 
-    if UE_SAVED_LOG.is_file():
-        extract_scene_lines(UE_SAVED_LOG, ue_log)
+    saved_logs = [path for path in UE_SAVED_LOGS if path.is_file()]
+    if saved_logs:
+        latest = max(saved_logs, key=lambda path: path.stat().st_mtime)
+        extract_scene_lines(latest, ue_log)
     run(["scp", "-o", "BatchMode=yes", f"{JETSON}:{remote_log}", str(local_log)])
     plot = run([
         sys.executable,

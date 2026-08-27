@@ -24,6 +24,7 @@ wandb/
 *.bak
 
 # local ops / bulky experiment outputs
+AGENTS.md
 WORKSPACE_CONTEXT.md
 experiments/**/closed_loop_logs/
 experiments/**/*.log

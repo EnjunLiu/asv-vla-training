@@ -4,8 +4,8 @@ $sshTarget = "jetson@192.168.137.100"
 $repo = "D:\asv-vla-training"
 $episodeRoot = Join-Path $repo "data\episodes\moving_target"
 $remoteRoot = "/tmp/asv_moving_collection_20260820"
-$ue = "D:\Softwares\Unreal Engine\UE_5.6\Engine\Binaries\Win64\UnrealEditor.exe"
-$project = "D:\asv-unreal-simulation\VLA.uproject"
+$ue = "D:\Softwares\Unreal Engine\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe"
+$project = "D:\asv-unreal-simulation\HILPlatform.uproject"
 
 function Invoke-Remote([string]$Command) {
     & ssh -o BatchMode=yes $sshTarget $Command
