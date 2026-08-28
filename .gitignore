@@ -27,3 +27,6 @@ wandb/
 AGENTS.md
 WORKSPACE_CONTEXT.md
 experiments/
+scripts/plot_*.py
+scripts/run_closed_loop*.py
+scripts/jetson_restart.sh
